@@ -8,18 +8,18 @@
 **Goal:** Solid core with bounded, safe operations
 
 ### Must Have
-- [ ] Schema definition with comptime validation
+- [x] Schema definition with comptime validation
   - Max array size: 65,536 elements
   - Max nesting: 8 levels
   - Explicit sized types only (no usize)
-- [ ] Basic serialization (CPU target only)
+- [x] Basic serialization (CPU target only)
   - File format with 24-byte header
   - CRC32 checksums
   - Max file size: 1 GB
-- [ ] Simple migration (v1 → v2)
+- [x] Manual migrations (v1 ↔ v2)
   - Up/down functions required
-  - Max chain: 16 versions
-  - Comptime validation
+  - Explicit chaining (no automatic chain walking yet)
+  - Compile-time guard rails when migrations are missing
 - [ ] CLI (`new`, `build`, `test`)
   - Functions ≤70 lines
   - Explicit error handling
