@@ -6,4 +6,6 @@ test {
     _ = @import("core/roundtrip_test.zig");
     _ = @import("core/migration_test.zig");
     _ = @import("core/integration_test.zig");
+    _ = @import("core/changeset_test.zig");
+    _ = @import("core/validators_test.zig");
 }

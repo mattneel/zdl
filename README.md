@@ -183,6 +183,38 @@ If a required migration is missing the build fails at comptime with a clear
 error. This keeps the current sprint lightweight while leaving the door open
 for automatic chaining in a later phase.
 
+## Changesets & Validation
+
+Sprint 4 layers structured validation ahead of serialization. Call
+`zdl.changeset.Changeset(T)` to get a bounded changeset builder that collects
+normalized field values plus validation errors (max 256 fields, 64 errors).
+Schema authors expose a helper under `zdl_config.changeset.validate` that pipes
+params through casting and validators, returning a changeset the caller must
+`deinit` once finished.
+
+```zig
+pub const zdl_config = .{
+    .version = 1,
+    .changeset = struct {
+        pub fn validate(params: anytype, allocator: std.mem.Allocator) !zdl.changeset.Changeset(User) {
+            var cs = zdl.changeset.Changeset(User).init(allocator);
+            errdefer cs.deinit();
+
+            try cs.cast(params, comptime &.{ "id", "name", "email", "score" });
+            try cs.validateRequired(&.{ "id", "name", "email" });
+            try cs.validateLength("name", .{ .min = 3, .max = 32 });
+            try cs.validateNumber("score", .{ .min = 0, .max = 1000 });
+
+            return cs;
+        }
+    },
+};
+```
+
+Built-in helpers live under `zdl.validators` (email, url, alphanumeric). Keep
+user-defined checks pure and bounded—run them before calling
+`zdl.serialize.serialize`.
+
 ## Serialization Guarantees
 
 Serialized payloads are canonicalised before computing the CRC32 checksum so
@@ -194,5 +226,8 @@ earlier.
 
 The `tests/` tree mirrors `src/` and aggregates unit tests through
 `tests/main.zig`, which `zig build test` executes in both Debug and ReleaseFast
-modes via the build graph. Release validation runs via `zig build test
--Doptimize=ReleaseFast` to ensure deterministic byte output.
+modes via the build graph. Release validation runs via
+`zig build test -Doptimize=ReleaseFast --summary all` to ensure deterministic
+byte output and keep the CRC32 canonicalisation guard rails intact. New Sprint 4
+coverage lives under `tests/core/changeset_test.zig`,
+`tests/core/validators_test.zig`, and extended integration/migration suites.

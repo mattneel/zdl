@@ -7,6 +7,8 @@ pub const Target = @import("core/target.zig").Target;
 pub const serialize = @import("core/serialize.zig");
 pub const deserialize = @import("core/deserialize.zig");
 pub const migrate = @import("core/migrate.zig");
+pub const changeset = @import("core/changeset.zig");
+pub const validators = @import("core/validators.zig");
 
 pub fn bufferedPrint() !void {
     var stdout_buffer: [1024]u8 = undefined;

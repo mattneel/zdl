@@ -73,14 +73,15 @@
 **Goal:** Bulletproof input validation
 
 ### Must Have
-- [ ] Changeset API
+- [x] Changeset API
   - Max 256 fields
   - Max 64 errors
   - Explicit memory ownership
-- [ ] Built-in validators
-  - Length: min/max with units
-  - Format: regex with bounds
-  - Number: range with explicit types
+- [x] Built-in validators
+  - Length bounds for byte fields
+  - Email shape (`@` plus dot)
+  - URL prefix (`http://` or `https://`)
+  - Alphanumeric guard
 - [ ] Custom validators
   - Pure functions only
   - Bounded execution
@@ -89,7 +90,7 @@
 ### Success Criteria
 - 100% error path coverage
 - Validators never panic
-- Performance: <1µs per field validation
+- Performance: <1µs per field validation (target)
 - Documentation with examples
 - Fuzz testing all validators
 
