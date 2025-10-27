@@ -14,11 +14,19 @@ fn assertRoundTrip(comptime T: type, value: T, allocator: std.mem.Allocator) !vo
 
     const header_len = @as(usize, format.HEADER_SIZE);
     const header = try format.validateHeader(bytes[0..header_len]);
-    const payload = bytes[header_len..];
+    const payload_len = @sizeOf(T);
+    const aligned_len = std.mem.alignForward(usize, payload_len, Target.cpu.alignment());
+    const payload = bytes[header_len .. header_len + aligned_len];
+    const data_bytes = payload[0..payload_len];
 
     try std.testing.expectEqual(@as(u32, schemaVersion(T)), header.version);
-    try std.testing.expectEqual(@as(u64, @intCast(payload.len)), header.length);
-    try std.testing.expectEqual(std.hash.crc.Crc32.hash(payload), header.checksum);
+    try std.testing.expectEqual(@as(u64, payload_len), header.length);
+    try std.testing.expectEqual(std.hash.crc.Crc32.hash(data_bytes), header.checksum);
+
+    if (aligned_len > payload_len) {
+        const padding = payload[payload_len..];
+        for (padding) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+    }
 
     const restored = try deserializer.deserialize(T, bytes, allocator);
     try std.testing.expectEqualDeep(value, restored);

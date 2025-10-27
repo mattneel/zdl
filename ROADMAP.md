@@ -42,14 +42,14 @@
 **Goal:** Proven cross-target reliability
 
 ### Must Have
-- [ ] Target-specific layouts
+- [x] Target-specific layouts
   - CPU: cache-line aligned (64 bytes)
   - Disk: page-aligned (4KB)
   - Network: packed, big-endian
-- [ ] Endianness handling
+- [x] Endianness handling
   - Explicit conversion functions
   - No implicit conversions
-- [ ] C library generation
+- [x] C library generation
   - Clean headers (no implementation leakage)
   - Example usage for each target
 - [ ] TypeScript bindings (Bun FFI)
@@ -63,6 +63,7 @@
 - Fuzzer covers all targets
 - Benchmarks show consistent performance
 - No undefined behavior (UBSAN clean)
+- C shared library exports validated (examples/c_usage + valgrind)
 
 ### Timeline
 4-6 weeks

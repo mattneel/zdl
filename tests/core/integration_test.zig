@@ -6,6 +6,7 @@ const query = @import("zdl").query;
 const Target = zdl.Target;
 const Changeset = zdl.changeset.Changeset;
 const format = zdl.format;
+const layout = zdl.layout;
 
 const UserV1 = struct {
     id: u64,
@@ -254,4 +255,60 @@ test "query iterator throughput exceeds target" {
     const throughput = (@as(u128, total_bytes) * 1_000_000_000) / @as(u128, elapsed);
     const target_throughput: u128 = 100 * 1024 * 1024;
     try std.testing.expect(throughput >= target_throughput);
+}
+
+const Portable = struct {
+    id: u64,
+    amount: f32,
+    flags: [4]u8,
+
+    pub const zdl_config = .{ .version = 1 };
+};
+
+test "network target serialization round trip" {
+    const allocator = std.testing.allocator;
+    const sample = Portable{
+        .id = 42,
+        .amount = 123.75,
+        .flags = .{ 1, 2, 3, 4 },
+    };
+
+    const net_bytes = try zdl.serialize.serialize(sample, Target.network, allocator);
+    defer allocator.free(net_bytes);
+
+    const decoded = try zdl.deserialize.deserialize(Portable, net_bytes, allocator);
+    try std.testing.expectEqualDeep(sample, decoded);
+}
+
+test "disk target serialization aligns payload" {
+    const allocator = std.testing.allocator;
+    const sample = Portable{
+        .id = 7,
+        .amount = 3.5,
+        .flags = .{ 9, 9, 9, 9 },
+    };
+
+    const disk_bytes = try zdl.serialize.serialize(sample, Target.disk, allocator);
+    defer allocator.free(disk_bytes);
+
+    const aligned_payload = std.mem.alignForward(usize, @sizeOf(Portable), Target.disk.alignment());
+    try std.testing.expectEqual(@as(usize, format.HEADER_SIZE) + aligned_payload, disk_bytes.len);
+}
+
+test "cpu payload transform to network and back" {
+    const allocator = std.testing.allocator;
+    var sample = Portable{
+        .id = 128,
+        .amount = -88.25,
+        .flags = .{ 5, 6, 7, 8 },
+    };
+
+    const raw_cpu = std.mem.asBytes(&sample)[0..];
+    const network_raw = try layout.transform(Portable, raw_cpu, Target.cpu, Target.network, allocator);
+    defer allocator.free(network_raw);
+
+    const back_to_cpu = try layout.transform(Portable, network_raw, Target.network, Target.cpu, allocator);
+    defer allocator.free(back_to_cpu);
+
+    try std.testing.expectEqualSlices(u8, raw_cpu, back_to_cpu);
 }

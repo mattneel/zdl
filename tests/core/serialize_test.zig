@@ -25,10 +25,13 @@ test "serialize emits header and payload for CPU target" {
 
     const header_len = @as(usize, format.HEADER_SIZE);
     const header_bytes = bytes[0..header_len];
-    const payload_bytes = bytes[header_len..];
+    const payload_len = @sizeOf(Sample);
+    const aligned_payload_len = std.mem.alignForward(usize, payload_len, Target.cpu.alignment());
+    const payload_bytes = bytes[header_len .. header_len + aligned_payload_len];
+    const data_bytes = payload_bytes[0..payload_len];
 
     const header = try format.validateHeader(header_bytes);
-    if (header.checksum != std.hash.crc.Crc32.hash(payload_bytes)) {
+    if (header.checksum != std.hash.crc.Crc32.hash(data_bytes)) {
         std.debug.print("header bytes: ", .{});
         for (header_bytes) |byte| std.debug.print("{X:0>2}", .{byte});
         std.debug.print("\n", .{});
@@ -36,29 +39,29 @@ test "serialize emits header and payload for CPU target" {
     try std.testing.expectEqual(format.MAGIC, header.magic);
     try std.testing.expectEqual(@as(u32, 7), header.version);
     try std.testing.expectEqual(@as(u8, @intFromEnum(Target.cpu)), header.target);
-    try std.testing.expectEqual(@as(u64, @intCast(payload_bytes.len)), header.length);
-    const expected_checksum = std.hash.crc.Crc32.hash(payload_bytes);
-    const computed_checksum = zdl.crc.compute(payload_bytes);
-    if (header.checksum != expected_checksum or computed_checksum != expected_checksum) {
-        std.debug.print("header {d} expected {d} computed {d}\n", .{
-            header.checksum,
-            expected_checksum,
-            computed_checksum,
-        });
-    }
+    try std.testing.expectEqual(@as(u64, payload_len), header.length);
+    const expected_checksum = std.hash.crc.Crc32.hash(data_bytes);
+    const computed_checksum = zdl.crc.compute(data_bytes);
     try std.testing.expectEqual(expected_checksum, header.checksum);
     try std.testing.expectEqual(expected_checksum, computed_checksum);
-    // Payload bytes are compared via CRC; padding may differ due to canonicalization.
+    if (aligned_payload_len > payload_len) {
+        const padding = payload_bytes[payload_len..];
+        for (padding) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+    }
 }
 
-test "serialize rejects unsupported targets" {
+test "serialize supports disk target" {
     const gpa = std.testing.allocator;
     const Sample = struct {
         value: u32,
     };
 
-    const result = serializer.serialize(Sample{ .value = 1 }, Target.disk, gpa);
-    try std.testing.expectError(serializer.SerializeError.UnsupportedTarget, result);
+    const bytes = try serializer.serialize(Sample{ .value = 1 }, Target.disk, gpa);
+    defer gpa.free(@constCast(bytes));
+
+    const expected_len = @as(usize, format.HEADER_SIZE) +
+        std.mem.alignForward(usize, @sizeOf(Sample), Target.disk.alignment());
+    try std.testing.expectEqual(expected_len, bytes.len);
 }
 
 test "crc sanity with testing allocator" {

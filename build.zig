@@ -1,4 +1,5 @@
 const std = @import("std");
+const schemas_pkg = @import("src/export/schemas.zig");
 
 // Although this function looks imperative, it does not perform the build
 // directly and instead it mutates the build graph (`b`) that will be then
@@ -40,6 +41,15 @@ pub fn build(b: *std.Build) void {
         // which requires us to specify a target.
         .target = target,
     });
+    zdl_module.link_libc = true;
+
+    const zdl_lib_module = b.createModule(.{
+        .root_source_file = b.path("src/lib_root.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    zdl_lib_module.link_libc = true;
+    zdl_lib_module.export_symbol_names = generateExportNames(b.allocator) catch @panic("OOM");
 
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
@@ -163,7 +173,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path(b.fmt("examples/{s}.zig", .{example_name})),
             .target = target,
             .optimize = optimize,
-            .imports = &.{ .{ .name = "zdl", .module = zdl_module } },
+            .imports = &.{.{ .name = "zdl", .module = zdl_module }},
         });
         const exe_example = b.addExecutable(.{
             .name = b.fmt("example-{s}", .{example_name}),
@@ -184,7 +194,7 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path(b.fmt("benchmarks/{s}.zig", .{bench_name})),
             .target = target,
             .optimize = optimize,
-            .imports = &.{ .{ .name = "zdl", .module = zdl_module } },
+            .imports = &.{.{ .name = "zdl", .module = zdl_module }},
         });
         const exe_bench = b.addExecutable(.{
             .name = b.fmt("benchmark-{s}", .{bench_name}),
@@ -199,6 +209,40 @@ pub fn build(b: *std.Build) void {
         bench_step.dependOn(&run_bench.step);
     }
 
+    const lib_output = b.pathJoin(&.{ "zig-out", "lib", "libzdl.so" });
+    const optimize_flag = b.fmt("-O{s}", .{@tagName(optimize)});
+    const emit_flag = b.fmt("-femit-bin={s}", .{lib_output});
+    const build_lib_cmd = b.addSystemCommand(&[_][]const u8{
+        "zig",
+        "build-lib",
+        "src/root.zig",
+        "-lc",
+        "-fPIC",
+        optimize_flag,
+        emit_flag,
+    });
+    b.getInstallStep().dependOn(&build_lib_cmd.step);
+
+    const gen_headers_module = b.createModule(.{
+        .root_source_file = b.path("tools/generate_headers.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "zdl", .module = zdl_module }},
+    });
+
+    const gen_headers = b.addExecutable(.{
+        .name = "gen-headers",
+        .root_module = gen_headers_module,
+    });
+
+    const run_gen_headers = b.addRunArtifact(gen_headers);
+    run_gen_headers.addArg("src/export/schemas.zig");
+    run_gen_headers.addArg("zig-out/include");
+
+    const gen_headers_step = b.step("gen-headers", "Generate C headers");
+    gen_headers_step.dependOn(&run_gen_headers.step);
+    b.getInstallStep().dependOn(&run_gen_headers.step);
+
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
     // The Zig build system is entirely implemented in userland, which means
@@ -210,4 +254,19 @@ pub fn build(b: *std.Build) void {
     //
     // Lastly, the Zig build system is relatively simple and self-contained,
     // and reading its source code will allow you to master it.
+}
+
+fn generateExportNames(allocator: std.mem.Allocator) ![]const []const u8 {
+    var list = std.ArrayListUnmanaged([]const u8){};
+    defer list.deinit(allocator);
+
+    inline for (schemas_pkg.registry) |entry| {
+        try list.append(allocator, std.fmt.comptimePrint("{s}_serialize", .{entry.c_prefix}));
+        try list.append(allocator, std.fmt.comptimePrint("{s}_deserialize", .{entry.c_prefix}));
+        try list.append(allocator, std.fmt.comptimePrint("{s}_free", .{entry.c_prefix}));
+        try list.append(allocator, std.fmt.comptimePrint("{s}_serialize_array", .{entry.c_prefix}));
+        try list.append(allocator, std.fmt.comptimePrint("{s}_array_count", .{entry.c_prefix}));
+    }
+
+    return list.toOwnedSlice(allocator);
 }

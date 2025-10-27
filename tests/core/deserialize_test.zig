@@ -22,19 +22,15 @@ test "deserialize reconstructs struct from serialized bytes" {
     try std.testing.expectEqualDeep(original, parsed);
 }
 
-test "deserialize rejects non CPU targets" {
+test "deserialize handles network target" {
     const gpa = std.testing.allocator;
-    const Sample = struct { value: u16 };
-    const original = Sample{ .value = 9 };
-    const bytes = try serializer.serialize(original, Target.cpu, gpa);
+    const Sample = struct { value: u32 };
+    const original = Sample{ .value = 0x01020304 };
+    const bytes = try serializer.serialize(original, Target.network, gpa);
     defer gpa.free(@constCast(bytes));
 
-    const mut = try gpa.dupe(u8, bytes);
-    defer gpa.free(mut);
-    mut[8] = 1; // toggle target
-
-    const result = deserializer.deserialize(Sample, mut, gpa);
-    try std.testing.expectError(deserializer.DeserializeError.UnsupportedTarget, result);
+    const parsed = try deserializer.deserialize(Sample, bytes, gpa);
+    try std.testing.expectEqualDeep(original, parsed);
 }
 
 test "deserialize detects checksum mismatch" {
@@ -65,7 +61,7 @@ test "deserialize enforces length match" {
     mut[length_offset] -%= 1;
 
     const result = deserializer.deserialize(Sample, mut, gpa);
-    try std.testing.expectError(deserializer.DeserializeError.LengthMismatch, result);
+    try std.testing.expectError(deserializer.DeserializeError.SizeMismatch, result);
 }
 
 test "deserialize errors on truncated payload" {
@@ -78,5 +74,5 @@ test "deserialize errors on truncated payload" {
     const truncated = bytes[0..truncated_len];
 
     const result = deserializer.deserialize(Sample, truncated, gpa);
-    try std.testing.expectError(deserializer.DeserializeError.TruncatedPayload, result);
+    try std.testing.expectError(deserializer.DeserializeError.TruncatedData, result);
 }

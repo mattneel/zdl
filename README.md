@@ -10,6 +10,8 @@ Fast, type-safe data serialization for Zig with schema evolution.
 - Type-safe manual migrations (v1 ↔ v2 ↔ v3)
 - Changeset validation (Ecto-style) with bounded errors
 - Zero-copy querying over canonicalised payloads
+- Target-specific layouts (CPU, disk, network) with endianness helpers
+- Shared C ABI exports with header/code generator
 
 ## Quick Start
 
@@ -46,8 +48,27 @@ Complete end-to-end samples are available in `examples/`:
 - `migrations.zig` – Manual schema evolution
 - `validation.zig` – Changeset validation workflow
 - `query.zig` – Zero-copy query builder
+- `c_usage/` – Minimal C program linking against `libzdl`
 
 Run them with `zig build example-basic_usage` (and the other step names).
+
+## C Library & Headers
+
+zdl ships with a drop-in C ABI so other languages can reuse schemas generated in Zig.
+
+- `zig build` now installs `libzdl` into `zig-out/lib` (linked against libc).
+- `zig build gen-headers` emits headers for every schema registered in `src/export/schemas.zig` and writes them to `zig-out/include`.
+- Update `src/export/schemas.zig` with your own types to control which structs become part of the C surface.
+- The helper in `tools/generate_headers.zig` can also be invoked directly for ad-hoc generation.
+- See `examples/c_usage/Makefile` for a reference build that compiles and runs the C demo (`make && ./main`).
+
+Each exported schema produces the following C entrypoints (names prefixed with the snake-case schema name):
+
+- `*_serialize` / `*_deserialize` for single structs
+- `*_serialize_array` / `*_array_count` for packed arrays
+- `*_free` to release memory returned by the API
+
+All functions allocate with the C allocator; callers may free the returned buffers with either `*_free` or a matching `free()`.
 
 ## Roadmap
 
@@ -298,6 +319,10 @@ while (it.next()) |record| {
 const top = try qb.collect();
 defer allocator.free(@constCast(top));
 ```
+
+## Multi-Target Layouts
+
+Payloads compile to per-target layouts via the `Target` enum. Disk writes align to 4 KB, network bytes are packed big-endian, and CPU keeps native padding. Use `zdl.layout.transform(T, bytes, from, to, allocator)` to convert raw payloads between targets without rehydrating headers, or round-trip through `serialize`/`deserialize` when headers are present.
 
 Filters are ANDed, bounds are explicit (`MAX_RESULTS = 1_000_000`,
 `MAX_FILTER_DEPTH = 8`), and iterators stream pointers without allocation. For
