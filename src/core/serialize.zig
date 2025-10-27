@@ -32,8 +32,7 @@ pub fn serialize(
     const buffer = try allocator.alloc(u8, total_len);
 
     const payload_dst = buffer[header_len..];
-    const canonical = canonicalize(T, value);
-    std.mem.copyForwards(u8, payload_dst, std.mem.asBytes(&canonical));
+    std.mem.copyForwards(u8, payload_dst, std.mem.asBytes(&value));
 
     const checksum = crc32.compute(payload_dst);
 
@@ -58,27 +57,4 @@ fn schemaVersion(comptime T: type) u32 {
         }
     }
     return 0;
-}
-
-fn canonicalize(comptime T: type, value: T) T {
-    return switch (@typeInfo(T)) {
-        .bool, .int, .float => value,
-        .array => |info| blk: {
-            var result: T = undefined;
-            var i: usize = 0;
-            while (i < info.len) : (i += 1) {
-                result[i] = canonicalize(info.child, value[i]);
-            }
-            break :blk result;
-        },
-        .@"struct" => |struct_info| blk: {
-            var result: T = std.mem.zeroes(T);
-            inline for (struct_info.fields) |field| {
-                if (field.is_comptime) continue;
-                @field(result, field.name) = canonicalize(field.type, @field(value, field.name));
-            }
-            break :blk result;
-        },
-        else => value,
-    };
 }
