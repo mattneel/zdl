@@ -77,9 +77,10 @@ pub fn QueryBuilder(comptime T: type) type {
             self.filters.deinit(self.allocator);
         }
 
-        pub fn limit(self: *Self, n: u32) void {
+        pub fn limit(self: *Self, n: u32) *Self {
             const capped: u32 = if (n > MAX_RESULTS) MAX_RESULTS else n;
             self.limit_value = capped;
+            return self;
         }
 
         pub fn filter(
@@ -87,7 +88,7 @@ pub fn QueryBuilder(comptime T: type) type {
             field_name: []const u8,
             op: Operator,
             value: anytype,
-        ) QueryError!void {
+        ) QueryError!*Self {
             if (self.filters.items.len >= MAX_FILTER_DEPTH) {
                 return error.TooManyFilters;
             }
@@ -102,10 +103,12 @@ pub fn QueryBuilder(comptime T: type) type {
                 .tag = tag,
                 .value = coerced,
             });
+            return self;
         }
 
-        pub fn clearFilters(self: *Self) void {
+        pub fn clearFilters(self: *Self) *Self {
             self.filters.clearRetainingCapacity();
+            return self;
         }
 
         pub fn iter(self: *Self) QueryError!Iterator {

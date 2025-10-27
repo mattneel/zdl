@@ -55,27 +55,27 @@ test "query filter operators" {
     var qb = query.QueryBuilder(Sample).init(bytes, allocator);
     defer qb.deinit();
 
-    try qb.filter("id", .eq, @as(u64, 3));
+    _ = try qb.filter("id", .eq, @as(u64, 3));
     var it = try qb.iter();
     const third = it.next() orelse unreachable;
     try std.testing.expectEqual(@as(u64, 3), third.id);
     try std.testing.expect(it.next() == null);
 
-    qb.clearFilters();
-    try qb.filter("score", .ne, 5.0);
+    _ = qb.clearFilters();
+    _ = try qb.filter("score", .ne, 5.0);
     it = try qb.iter();
     try std.testing.expect(it.next().?.id != 1);
 
-    qb.clearFilters();
-    try qb.filter("score", .lt, 9.0);
+    _ = qb.clearFilters();
+    _ = try qb.filter("score", .lt, 9.0);
     it = try qb.iter();
     try std.testing.expectEqual(@as(u64, 1), it.next().?.id);
     try std.testing.expectEqual(@as(u64, 2), it.next().?.id);
     try std.testing.expectEqual(@as(u64, 3), it.next().?.id);
     try std.testing.expect(it.next() == null);
 
-    qb.clearFilters();
-    try qb.filter("score", .ge, 7.5);
+    _ = qb.clearFilters();
+    _ = try qb.filter("score", .ge, 7.5);
     it = try qb.iter();
     try std.testing.expectEqual(@as(u64, 2), it.next().?.id);
 }
@@ -94,8 +94,8 @@ test "query combines multiple filters with AND logic" {
     var qb = query.QueryBuilder(Sample).init(bytes, allocator);
     defer qb.deinit();
 
-    try qb.filter("score", .eq, 8.0);
-    try qb.filter("flag", .eq, 1);
+    _ = try qb.filter("score", .eq, 8.0);
+    _ = try qb.filter("flag", .eq, 1);
 
     var it = try qb.iter();
     const match = it.next() orelse unreachable;
@@ -117,14 +117,14 @@ test "query limit enforcement and collection" {
     var qb = query.QueryBuilder(Sample).init(bytes, allocator);
     defer qb.deinit();
 
-    qb.limit(2);
+    _ = qb.limit(2);
     var it = try qb.iter();
     try std.testing.expectEqual(@as(u64, 1), it.next().?.id);
     try std.testing.expectEqual(@as(u64, 2), it.next().?.id);
     try std.testing.expect(it.next() == null);
 
-    qb.clearFilters();
-    qb.limit(3);
+    _ = qb.clearFilters();
+    _ = qb.limit(3);
     const collected = try qb.collect();
     defer allocator.free(@constCast(collected));
     try std.testing.expectEqual(@as(usize, 3), collected.len);
@@ -144,13 +144,13 @@ test "query returns empty result set when filters eliminate all rows" {
     var qb = query.QueryBuilder(Sample).init(bytes, allocator);
     defer qb.deinit();
 
-    try qb.filter("id", .eq, @as(u64, 99));
+    _ = try qb.filter("id", .eq, @as(u64, 99));
     var it = try qb.iter();
     try std.testing.expect(it.next() == null);
 
-    qb.clearFilters();
-    qb.limit(1);
-    try qb.filter("score", .gt, 100.0);
+    _ = qb.clearFilters();
+    _ = qb.limit(1);
+    _ = try qb.filter("score", .gt, 100.0);
     const collected = try qb.collect();
     defer allocator.free(@constCast(collected));
     try std.testing.expectEqual(@as(usize, 0), collected.len);
@@ -167,7 +167,7 @@ test "query enforces max filter depth" {
 
     var i: usize = 0;
     while (i < query.MAX_FILTER_DEPTH) : (i += 1) {
-        try qb.filter("id", .ge, @as(u64, 0));
+        _ = try qb.filter("id", .ge, @as(u64, 0));
     }
 
     try std.testing.expectError(QueryError.TooManyFilters, qb.filter("id", .ge, @as(u64, 0)));

@@ -191,9 +191,9 @@ test "query integration filters and collects from serialized array" {
     var qb = query.QueryBuilder(QueryUser).init(bytes, allocator);
     defer qb.deinit();
 
-    qb.limit(3);
-    try qb.filter("active", .eq, @as(u8, 1));
-    try qb.filter("score", .ge, @as(f32, 50.0));
+    _ = qb.limit(3);
+    _ = try qb.filter("active", .eq, @as(u8, 1));
+    _ = try qb.filter("score", .ge, @as(f32, 50.0));
 
     const results = try qb.collect();
     defer allocator.free(@constCast(results));

@@ -28,7 +28,7 @@ pub fn build(b: *std.Build) void {
     // to our consumers. We must give it a name because a Zig package can expose
     // multiple modules and consumers will need to be able to specify which
     // module they want to access.
-    const mod = b.addModule("zdl", .{
+    const zdl_module = b.addModule("zdl", .{
         // The root source file is the "entry point" of this module. Users of
         // this module will only be able to access public declarations contained
         // in this file, which means that if you have declarations that you
@@ -78,7 +78,7 @@ pub fn build(b: *std.Build) void {
                 // repeated because you are allowed to rename your imports, which
                 // can be extremely useful in case of collisions (which can happen
                 // importing modules from different packages).
-                .{ .name = "zdl", .module = mod },
+                .{ .name = "zdl", .module = zdl_module },
             },
         }),
     });
@@ -119,7 +119,7 @@ pub fn build(b: *std.Build) void {
     // Here `mod` needs to define a target, which is why earlier we made sure to
     // set the releative field.
     const mod_tests = b.addTest(.{
-        .root_module = mod,
+        .root_module = zdl_module,
     });
 
     // A run step that will run the test executable.
@@ -141,7 +141,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "zdl", .module = mod },
+            .{ .name = "zdl", .module = zdl_module },
         },
     });
     const aggregated_tests = b.addTest(.{
@@ -156,6 +156,48 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_aggregated_tests.step);
+
+    const example_names = [_][]const u8{ "basic_usage", "migrations", "validation", "query" };
+    for (example_names) |example_name| {
+        const example_module = b.createModule(.{
+            .root_source_file = b.path(b.fmt("examples/{s}.zig", .{example_name})),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{ .{ .name = "zdl", .module = zdl_module } },
+        });
+        const exe_example = b.addExecutable(.{
+            .name = b.fmt("example-{s}", .{example_name}),
+            .root_module = example_module,
+        });
+
+        const run_example = b.addRunArtifact(exe_example);
+        const run_step_example = b.step(
+            b.fmt("example-{s}", .{example_name}),
+            b.fmt("Run {s} example", .{example_name}),
+        );
+        run_step_example.dependOn(&run_example.step);
+    }
+
+    const benchmark_names = [_][]const u8{ "serialize", "deserialize", "query" };
+    for (benchmark_names) |bench_name| {
+        const bench_module = b.createModule(.{
+            .root_source_file = b.path(b.fmt("benchmarks/{s}.zig", .{bench_name})),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{ .{ .name = "zdl", .module = zdl_module } },
+        });
+        const exe_bench = b.addExecutable(.{
+            .name = b.fmt("benchmark-{s}", .{bench_name}),
+            .root_module = bench_module,
+        });
+
+        const run_bench = b.addRunArtifact(exe_bench);
+        const bench_step = b.step(
+            b.fmt("benchmark-{s}", .{bench_name}),
+            b.fmt("Run {s} benchmark", .{bench_name}),
+        );
+        bench_step.dependOn(&run_bench.step);
+    }
 
     // Just like flags, top level steps are also listed in the `--help` menu.
     //

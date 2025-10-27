@@ -1,4 +1,63 @@
-# zdl: Zero Data Layer
+# zdl - Zero Data Layer
+
+Fast, type-safe data serialization for Zig with schema evolution.
+
+## Features
+
+✅ **Phase 1 Complete:**
+- Comptime schema validation with explicit TigerStyle bounds
+- CPU-target serialization/deserialization and CRC32 protection
+- Type-safe manual migrations (v1 ↔ v2 ↔ v3)
+- Changeset validation (Ecto-style) with bounded errors
+- Zero-copy querying over canonicalised payloads
+
+## Quick Start
+
+```zig
+const zdl = @import("zdl");
+
+const User = struct {
+    id: u64,
+    name: [32]u8,
+
+    pub const zdl_config = .{ .version = 1 };
+};
+
+// Serialize
+const bytes = try zdl.serialize.serialize(user, .cpu, allocator);
+defer allocator.free(@constCast(bytes));
+
+// Deserialize
+const loaded = try zdl.deserialize.deserialize(User, bytes, allocator);
+```
+
+## Performance (Phase 1 Targets)
+
+- Serialization: >100 MB/sec ✅
+- Deserialization: >100 MB/sec ✅
+- Query iteration: >100 MB/sec ✅
+
+Benchmarks live under `benchmarks/` (`zig build benchmark-serialize`, `zig build benchmark-query`).
+
+## Examples
+
+Complete end-to-end samples are available in `examples/`:
+- `basic_usage.zig` – Serialize / deserialize basics
+- `migrations.zig` – Manual schema evolution
+- `validation.zig` – Changeset validation workflow
+- `query.zig` – Zero-copy query builder
+
+Run them with `zig build example-basic_usage` (and the other step names).
+
+## Roadmap
+
+**Phase 1 (✅ Complete):** Core serialization, migrations, validation, query engine.
+
+**Phase 2 (Next):** Multi-target layouts (disk/network/GPU), C API generation, language bindings.
+
+See `ROADMAP.md` for the full breakdown.
+
+---
 
 **Version:** 0.1.0  
 **Target:** Zig 0.15.1+  
@@ -224,12 +283,12 @@ item bytes while `format.arrayCount(bytes)` exposes the stored count. Query
 workflows build on this layout:
 
 ```zig
-const qb = zdl.query.QueryBuilder(Event).init(bytes, allocator);
+var qb = zdl.query.query(Event, bytes, allocator);
 defer qb.deinit();
 
-qb.limit(50);
-try qb.filter("status", .eq, @as(u8, 1));
-try qb.filter("duration_ms", .lt, @as(u64, 10_000));
+_ = try qb.filter("status", .eq, @as(u8, 1));
+_ = try qb.filter("duration_ms", .lt, @as(u64, 10_000));
+_ = qb.limit(50);
 
 var it = try qb.iter();
 while (it.next()) |record| {
