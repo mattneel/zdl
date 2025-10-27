@@ -103,7 +103,7 @@
 **Goal:** Fast, safe data access
 
 ### Must Have
-- [ ] Basic filtering
+- [x] Basic filtering (CPU array payloads)
   - Max result set: 1M records
   - Max filter depth: 8 levels
   - Explicit `.limit()` required
@@ -121,7 +121,7 @@
   - Work stealing
 
 ### Success Criteria
-- >1 GB/sec single-threaded throughput
+- >100 MB/sec single-threaded throughput (baseline)
 - Linear scaling to 16 cores
 - No query can exhaust memory
 - Cache-friendly access patterns

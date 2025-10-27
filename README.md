@@ -215,6 +215,36 @@ Built-in helpers live under `zdl.validators` (email, url, alphanumeric). Keep
 user-defined checks pure and bounded—run them before calling
 `zdl.serialize.serialize`.
 
+## Querying Serialized Data
+
+Sprint 5 adds zero-copy querying over canonicalized payloads. Use
+`zdl.format.serializeArray(T, items, Target.cpu, allocator)` to emit an array
+container: `[Header][count: u64][items...]`. The header’s `length` tracks the
+item bytes while `format.arrayCount(bytes)` exposes the stored count. Query
+workflows build on this layout:
+
+```zig
+const qb = zdl.query.QueryBuilder(Event).init(bytes, allocator);
+defer qb.deinit();
+
+qb.limit(50);
+try qb.filter("status", .eq, @as(u8, 1));
+try qb.filter("duration_ms", .lt, @as(u64, 10_000));
+
+var it = try qb.iter();
+while (it.next()) |record| {
+    // record points directly into the serialized buffer
+}
+
+const top = try qb.collect();
+defer allocator.free(@constCast(top));
+```
+
+Filters are ANDed, bounds are explicit (`MAX_RESULTS = 1_000_000`,
+`MAX_FILTER_DEPTH = 8`), and iterators stream pointers without allocation. For
+array payloads the builder verifies counts, CRC32 checksums, and alignment before
+exposing the data window.
+
 ## Serialization Guarantees
 
 Serialized payloads are canonicalised before computing the CRC32 checksum so
@@ -228,6 +258,7 @@ The `tests/` tree mirrors `src/` and aggregates unit tests through
 `tests/main.zig`, which `zig build test` executes in both Debug and ReleaseFast
 modes via the build graph. Release validation runs via
 `zig build test -Doptimize=ReleaseFast --summary all` to ensure deterministic
-byte output and keep the CRC32 canonicalisation guard rails intact. New Sprint 4
-coverage lives under `tests/core/changeset_test.zig`,
-`tests/core/validators_test.zig`, and extended integration/migration suites.
+byte output and keep the CRC32 canonicalisation guard rails intact. Recent
+coverage includes `tests/core/changeset_test.zig`, `tests/core/validators_test.zig`,
+`tests/core/query_test.zig`, and the augmented integration exercises that now
+walk serialization → validation → query round-trips.

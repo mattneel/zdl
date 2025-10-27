@@ -2,8 +2,10 @@ const std = @import("std");
 const zdl = @import("zdl");
 
 const migrate = @import("zdl").migrate;
+const query = @import("zdl").query;
 const Target = zdl.Target;
 const Changeset = zdl.changeset.Changeset;
+const format = zdl.format;
 
 const UserV1 = struct {
     id: u64,
@@ -164,4 +166,92 @@ test "changeset blocks invalid serialization attempts" {
     try std.testing.expectError(error.ValidationFailed, cs.apply());
     try std.testing.expectEqual(@as(usize, 3), cs.errors.items.len);
     try std.testing.expect(std.mem.eql(u8, cs.errors.items[0].field, "email"));
+}
+
+const QueryUser = struct {
+    id: u64,
+    score: f32,
+    active: u8,
+
+    pub const zdl_config = .{ .version = 1 };
+};
+
+test "query integration filters and collects from serialized array" {
+    const allocator = std.testing.allocator;
+    const users = [_]QueryUser{
+        .{ .id = 1, .score = 25.0, .active = 0 },
+        .{ .id = 2, .score = 55.0, .active = 1 },
+        .{ .id = 3, .score = 72.0, .active = 1 },
+        .{ .id = 4, .score = 40.0, .active = 1 },
+    };
+
+    const bytes = try format.serializeArray(QueryUser, &users, Target.cpu, allocator);
+    defer allocator.free(@constCast(bytes));
+
+    var qb = query.QueryBuilder(QueryUser).init(bytes, allocator);
+    defer qb.deinit();
+
+    qb.limit(3);
+    try qb.filter("active", .eq, @as(u8, 1));
+    try qb.filter("score", .ge, @as(f32, 50.0));
+
+    const results = try qb.collect();
+    defer allocator.free(@constCast(results));
+    try std.testing.expectEqual(@as(usize, 2), results.len);
+    try std.testing.expectEqual(@as(u64, 2), results[0].id);
+    try std.testing.expectEqual(@as(u64, 3), results[1].id);
+}
+
+test "query integration exposes zero-copy iteration" {
+    const allocator = std.testing.allocator;
+    const users = [_]QueryUser{
+        .{ .id = 10, .score = 11.0, .active = 1 },
+        .{ .id = 11, .score = 12.0, .active = 1 },
+    };
+
+    const bytes = try format.serializeArray(QueryUser, &users, Target.cpu, allocator);
+    defer allocator.free(@constCast(bytes));
+
+    var qb = query.QueryBuilder(QueryUser).init(bytes, allocator);
+    defer qb.deinit();
+
+    var it = try qb.iter();
+    const first = it.next() orelse unreachable;
+    const addr = @intFromPtr(first);
+    const start = @intFromPtr(bytes.ptr);
+    const end = start + bytes.len;
+    try std.testing.expect(addr >= start and addr < end);
+}
+
+test "query iterator throughput exceeds target" {
+    const allocator = std.testing.allocator;
+    const PerfSample = struct {
+        value: u64,
+        pub const zdl_config = .{ .version = 1 };
+    };
+
+    const count: usize = 512 * 1024;
+    const items = try allocator.alloc(PerfSample, count);
+    defer allocator.free(items);
+    for (items, 0..) |*item, idx| item.* = .{ .value = @intCast(idx) };
+
+    const bytes = try format.serializeArray(PerfSample, items, Target.cpu, allocator);
+    defer allocator.free(@constCast(bytes));
+
+    var qb = query.QueryBuilder(PerfSample).init(bytes, allocator);
+    defer qb.deinit();
+
+    var it = try qb.iter();
+    var processed: usize = 0;
+    var timer = try std.time.Timer.start();
+    while (it.next()) |entry| {
+        const expected_value: u64 = @intCast(processed);
+        try std.testing.expectEqual(expected_value, entry.value);
+        processed += 1;
+    }
+    const elapsed = timer.read() + 1; // avoid divide by zero
+    const total_bytes = processed * @sizeOf(PerfSample);
+    const throughput = (@as(u128, total_bytes) * 1_000_000_000) / @as(u128, elapsed);
+    const target_throughput: u128 = 100 * 1024 * 1024;
+    try std.testing.expect(throughput >= target_throughput);
 }

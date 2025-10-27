@@ -1,6 +1,7 @@
 const std = @import("std");
 const zdl = @import("zdl");
 const format = zdl.format;
+const Target = zdl.Target;
 
 test "validateHeader succeeds for well-formed bytes" {
     var buf: [format.HEADER_SIZE]u8 = undefined;
@@ -68,4 +69,44 @@ test "validateHeader rejects non-zero reserved bytes" {
 test "validateHeader errors on short buffer" {
     var buf: [format.HEADER_SIZE - 1]u8 = [_]u8{0} ** (format.HEADER_SIZE - 1);
     try std.testing.expectError(format.FormatError.InvalidFormat, format.validateHeader(&buf));
+}
+
+const ArraySample = struct {
+    value: u16,
+    pub const zdl_config = .{ .version = 1 };
+};
+
+test "serializeArray encodes count and canonical payload" {
+    const allocator = std.testing.allocator;
+    const items = [_]ArraySample{
+        .{ .value = 1 },
+        .{ .value = 2 },
+        .{ .value = 3 },
+    };
+
+    const bytes = try format.serializeArray(ArraySample, &items, Target.cpu, allocator);
+    defer allocator.free(@constCast(bytes));
+
+    const header_len = format.HEADER_SIZE;
+    const header = try format.validateHeader(bytes[0..header_len]);
+    try std.testing.expectEqual(@as(u64, items.len * @sizeOf(ArraySample)), header.length);
+
+    const count = try format.arrayCount(bytes);
+    try std.testing.expectEqual(@as(u64, items.len), count);
+
+    const payload = bytes[header_len + 8 ..];
+    var expected: [items.len]ArraySample = undefined;
+    for (items, 0..) |item, idx| {
+        expected[idx] = item;
+    }
+    try std.testing.expectEqualSlices(u8, std.mem.asBytes(&expected), payload);
+}
+
+test "arrayCount rejects truncated buffers" {
+    const allocator = std.testing.allocator;
+    const items = [_]ArraySample{.{ .value = 7 }};
+    const bytes = try format.serializeArray(ArraySample, &items, Target.cpu, allocator);
+    defer allocator.free(@constCast(bytes));
+
+    try std.testing.expectError(format.FormatError.InvalidFormat, format.arrayCount(bytes[0 .. bytes.len - 4]));
 }

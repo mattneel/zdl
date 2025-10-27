@@ -8,4 +8,5 @@ test {
     _ = @import("core/integration_test.zig");
     _ = @import("core/changeset_test.zig");
     _ = @import("core/validators_test.zig");
+    _ = @import("core/query_test.zig");
 }
