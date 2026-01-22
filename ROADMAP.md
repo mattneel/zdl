@@ -4,7 +4,7 @@
 
 **Do it right the first time.** Each phase is complete before moving forward. No technical debt.
 
-## Phase 1: Foundation (v0.1.0)
+## Phase 1: Foundation (v0.1.0) ✅
 **Goal:** Solid core with bounded, safe operations
 
 ### Must Have
@@ -20,6 +20,11 @@
   - Up/down functions required
   - Explicit chaining (no automatic chain walking yet)
   - Compile-time guard rails when migrations are missing
+- [x] C FFI generation
+  - `zdl.exportCApi()` for shared library exports
+  - `zdl.getExportNames()` for build.zig configuration
+  - Header generation via `zdl.codegen.c_header`
+  - Full `zig fetch` package support
 - [ ] CLI (`new`, `build`, `test`)
   - Functions ≤70 lines
   - Explicit error handling
@@ -38,8 +43,8 @@
 
 ---
 
-## Phase 2: Multi-Target (v0.2.0)
-**Goal:** Proven cross-target reliability
+## Phase 2: Multi-Target & Bindings (v0.2.0)
+**Goal:** Cross-platform reliability and language bindings
 
 ### Must Have
 - [x] Target-specific layouts
@@ -49,13 +54,14 @@
 - [x] Endianness handling
   - Explicit conversion functions
   - No implicit conversions
-- [x] C library generation
-  - Clean headers (no implementation leakage)
-  - Example usage for each target
 - [ ] TypeScript bindings (Bun FFI)
   - Memory ownership documented
   - Error handling examples
   - Zero unsafe casts
+- [ ] Python bindings
+  - Type hints
+  - Memory safety
+  - GC-friendly
 
 ### Success Criteria
 - Works on: x86_64-linux, x86_64-macos, aarch64-linux
@@ -63,7 +69,6 @@
 - Fuzzer covers all targets
 - Benchmarks show consistent performance
 - No undefined behavior (UBSAN clean)
-- C shared library exports validated (examples/c_usage + valgrind)
 
 ### Timeline
 4-6 weeks

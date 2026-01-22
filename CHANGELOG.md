@@ -3,34 +3,56 @@
 ## [0.1.0] - Phase 1 Complete
 
 ### Added
+
+**Core Serialization**
 - Comptime schema validation with TigerStyle guard rails
 - CPU-target serialization/deserialization with canonical CRC32 headers
-- Type-safe manual migrations (v1 ↔ v2 ↔ v3)
-- Changeset validation framework
-- Built-in validators (email, URL, alphanumeric)
-- Zero-copy query engine with bounded filters and limits
-- Array serialization format for bulk payloads
 - Target-specific layouts (CPU, disk, network) with endian-aware transforms
-- C FFI exports (`libzdl.so` + generated headers via `zig build`/`zig build gen-headers`)
-- Golden C example (`examples/c_usage`) with valgrind-clean smoke test
-- Comprehensive test suite (53 tests, all green)
-  - Expanded to 61 tests covering layouts and targets
-- Usage examples (`examples/`) covering serialization, migrations, validation, and queries
-- Benchmark drivers (`benchmarks/`) for serialization, deserialization, and query iteration
+- Array serialization format for bulk payloads
+
+**Schema Evolution**
+- Type-safe manual migrations (v1 ↔ v2 ↔ v3)
+- Explicit up/down migration functions
+- Compile-time validation of migration chains
+
+**Validation**
+- Changeset validation framework (Ecto-style)
+- Built-in validators (email, URL, alphanumeric, length, number range)
+- Bounded error collection (max 64 errors per changeset)
+
+**Query Engine**
+- Zero-copy query builder over serialized payloads
+- Filter operators: eq, ne, lt, le, gt, ge
+- Bounded results with explicit `.limit()`
+
+**C FFI**
+- `zdl.SchemaDescriptor` for registering types
+- `zdl.exportCApi()` generates C-callable serialize/deserialize/free functions
+- `zdl.getExportNames()` for build.zig symbol export configuration
+- `zdl.codegen.c_header.generateHeader()` for C header generation
+- Full Zig package support (`zig fetch --save`)
+
+**Examples & Testing**
+- Usage examples: basic_usage, migrations, validation, query
+- C FFI example with Makefile (`examples/c_usage/`)
+- Comprehensive test suite (61 tests)
+- Benchmark drivers for serialize, deserialize, query
 
 ### Performance
-- Serialization: >100 MB/sec
-- Deserialization: >100 MB/sec
-- Query iteration: >100 MB/sec (zero-copy)
+
+| Operation | Throughput |
+|-----------|------------|
+| Serialization | >100 MB/sec |
+| Deserialization | >100 MB/sec |
+| Query iteration | >100 MB/sec |
 
 ### Documentation
-- README quick start and roadmap
-- Contributor guide (`AGENTS.md`)
-- Phase-tracked roadmap (`ROADMAP.md`)
-- Inline API documentation and examples
+- README with installation, quick start, and C FFI guide
+- ROADMAP.md with phase-tracked development plan
+- AGENTS.md contributor guide
+- Inline API documentation
 
 ### Known Limitations
-- GPU layouts stubbed (CUDA/Metal planned for Phase 2.5)
-- Manual migration chains (no automatic chain discovery yet)
-- Basic filter operators (AND logic, six comparison ops)
-- No SIMD or multi-threaded query acceleration yet
+- GPU layouts stubbed (CUDA/Metal planned for Phase 2)
+- Manual migration chains only (no automatic chain discovery)
+- Single-threaded query execution (SIMD/parallel planned for Phase 4)

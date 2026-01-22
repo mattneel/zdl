@@ -1,9 +1,6 @@
-pub const SchemaDescriptor = struct {
-    /// Type to expose through the C API.
-    Type: type,
-    /// Lowercase snake prefix used for function names and header files.
-    c_prefix: []const u8,
-};
+const c_api = @import("c_api.zig");
+
+pub const SchemaDescriptor = c_api.SchemaDescriptor;
 
 pub const types = struct {
     pub const FfiUser = struct {

@@ -1,17 +1,36 @@
 # zdl - Zero Data Layer
 
-Fast, type-safe data serialization for Zig with schema evolution.
+Fast, type-safe data serialization for Zig with schema evolution and C FFI.
 
 ## Features
 
-✅ **Phase 1 Complete:**
-- Comptime schema validation with explicit TigerStyle bounds
-- CPU-target serialization/deserialization and CRC32 protection
-- Type-safe manual migrations (v1 ↔ v2 ↔ v3)
-- Changeset validation (Ecto-style) with bounded errors
-- Zero-copy querying over canonicalised payloads
-- Target-specific layouts (CPU, disk, network) with endianness helpers
-- Shared C ABI exports with header/code generator
+- **Comptime schema validation** with explicit TigerStyle bounds
+- **CPU-target serialization** with CRC32 protection
+- **Type-safe migrations** (v1 ↔ v2 ↔ v3)
+- **Changeset validation** (Ecto-style) with bounded errors
+- **Zero-copy querying** over serialized payloads
+- **Target-specific layouts** (CPU, disk, network)
+- **C FFI generation** for cross-language interop
+
+## Installation
+
+Add zdl to your project:
+
+```sh
+zig fetch --save git+https://github.com/your-org/zdl
+```
+
+Configure your `build.zig`:
+
+```zig
+const zdl_dep = b.dependency("zdl", .{
+    .target = target,
+    .optimize = optimize,
+});
+
+// Add zdl to your module
+exe.root_module.addImport("zdl", zdl_dep.module("zdl"));
+```
 
 ## Quick Start
 
@@ -33,95 +52,176 @@ defer allocator.free(@constCast(bytes));
 const loaded = try zdl.deserialize.deserialize(User, bytes, allocator);
 ```
 
-## Performance (Phase 1 Targets)
+## C FFI Generation
 
-- Serialization: >100 MB/sec ✅
-- Deserialization: >100 MB/sec ✅
-- Query iteration: >100 MB/sec ✅
+zdl provides first-class C interop. Define your schemas, register them, and zdl generates a shared library with C-callable functions plus matching headers.
 
-Benchmarks live under `benchmarks/` (`zig build benchmark-serialize`, `zig build benchmark-query`).
+### 1. Define Schemas
+
+Create `src/schemas.zig`:
+
+```zig
+const zdl = @import("zdl");
+
+pub const User = struct {
+    id: u64,
+    name: [32]u8,
+    score: f32,
+
+    pub const zdl_config = .{ .version = 1 };
+};
+
+pub const Event = struct {
+    timestamp: u64,
+    kind: u8,
+    payload: [256]u8,
+
+    pub const zdl_config = .{ .version = 1 };
+};
+
+// Register types for C export
+pub const registry = [_]zdl.SchemaDescriptor{
+    .{ .Type = User, .c_prefix = "user" },
+    .{ .Type = Event, .c_prefix = "event" },
+};
+```
+
+### 2. Create Library Root
+
+Create `src/lib_root.zig`:
+
+```zig
+const zdl = @import("zdl");
+const schemas = @import("schemas.zig");
+
+comptime {
+    zdl.exportCApi(&schemas.registry);
+}
+```
+
+### 3. Configure Build
+
+In your `build.zig`:
+
+```zig
+const std = @import("std");
+const zdl_pkg = @import("zdl");
+
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+
+    const zdl_dep = b.dependency("zdl", .{ .target = target, .optimize = optimize });
+    const zdl_mod = zdl_dep.module("zdl");
+
+    // Schemas module
+    const schemas_mod = b.createModule(.{
+        .root_source_file = b.path("src/schemas.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "zdl", .module = zdl_mod }},
+    });
+
+    // Library module
+    const lib_mod = b.createModule(.{
+        .root_source_file = b.path("src/lib_root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "zdl", .module = zdl_mod },
+            .{ .name = "schemas", .module = schemas_mod },
+        },
+    });
+    lib_mod.link_libc = true;
+
+    // Export symbols
+    const schemas = @import("src/schemas.zig");
+    lib_mod.export_symbol_names = zdl_pkg.interop.c_api.getExportNames(&schemas.registry);
+
+    // Build shared library
+    const lib = b.addLibrary(.{
+        .name = "myschemas",
+        .linkage = .dynamic,
+        .root_module = lib_mod,
+    });
+    b.installArtifact(lib);
+}
+```
+
+### 4. Generate Headers
+
+Create `tools/gen_headers.zig`:
+
+```zig
+const std = @import("std");
+const zdl = @import("zdl");
+const schemas = @import("schemas");
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
+
+    const output_dir = if (args.len > 1) args[1] else "include";
+    var dir = try std.fs.cwd().makeOpenPath(output_dir, .{});
+    defer dir.close();
+
+    inline for (schemas.registry) |entry| {
+        const file_name = entry.c_prefix ++ ".h";
+        var file = try dir.createFile(file_name, .{ .truncate = true });
+        defer file.close();
+
+        var buf = std.ArrayListUnmanaged(u8){};
+        defer buf.deinit(allocator);
+
+        try zdl.codegen.c_header.generateHeader(entry.Type, buf.writer(allocator));
+        try file.writeAll(buf.items);
+
+        std.debug.print("generated {s}\n", .{file_name});
+    }
+}
+```
+
+### C API Reference
+
+Each registered schema exports these functions:
+
+| Function | Signature |
+|----------|-----------|
+| `{prefix}_serialize` | `uint8_t* (const T* value, zdl_target_t target, size_t* out_len)` |
+| `{prefix}_deserialize` | `T* (const uint8_t* bytes, size_t len)` |
+| `{prefix}_free` | `void (void* ptr)` |
+| `{prefix}_serialize_array` | `uint8_t* (const T* items, size_t count, zdl_target_t target, size_t* out_len)` |
+| `{prefix}_array_count` | `uint64_t (const uint8_t* bytes, size_t len)` |
+
+All functions use the C allocator. Free returned buffers with `{prefix}_free()` or `free()`.
 
 ## Examples
 
-Complete end-to-end samples are available in `examples/`:
-- `basic_usage.zig` – Serialize / deserialize basics
-- `migrations.zig` – Manual schema evolution
+The `examples/` directory contains complete working examples:
+
+- `basic_usage.zig` – Serialize/deserialize basics
+- `migrations.zig` – Schema evolution
 - `validation.zig` – Changeset validation workflow
 - `query.zig` – Zero-copy query builder
-- `c_usage/` – Minimal C program linking against `libzdl`
+- `c_usage/` – C program linking against zdl
 
-Run them with `zig build example-basic_usage` (and the other step names).
+Run with `zig build example-basic_usage` (etc).
 
-## C Library & Headers
+## Performance
 
-zdl ships with a drop-in C ABI so other languages can reuse schemas generated in Zig.
+| Operation | Throughput |
+|-----------|------------|
+| Serialization | >100 MB/sec |
+| Deserialization | >100 MB/sec |
+| Query iteration | >100 MB/sec |
 
-- `zig build` now installs `libzdl` into `zig-out/lib` (linked against libc).
-- `zig build gen-headers` emits headers for every schema registered in `src/export/schemas.zig` and writes them to `zig-out/include`.
-- Update `src/export/schemas.zig` with your own types to control which structs become part of the C surface.
-- The helper in `tools/generate_headers.zig` can also be invoked directly for ad-hoc generation.
-- See `examples/c_usage/Makefile` for a reference build that compiles and runs the C demo (`make && ./main`).
-
-Each exported schema produces the following C entrypoints (names prefixed with the snake-case schema name):
-
-- `*_serialize` / `*_deserialize` for single structs
-- `*_serialize_array` / `*_array_count` for packed arrays
-- `*_free` to release memory returned by the API
-
-All functions allocate with the C allocator; callers may free the returned buffers with either `*_free` or a matching `free()`.
-
-## Roadmap
-
-**Phase 1 (✅ Complete):** Core serialization, migrations, validation, query engine.
-
-**Phase 2 (Next):** Multi-target layouts (disk/network/GPU), C API generation, language bindings.
-
-See `ROADMAP.md` for the full breakdown.
+Run benchmarks: `zig build benchmark-serialize`, `zig build benchmark-query`
 
 ---
-
-**Version:** 0.1.0  
-**Target:** Zig 0.15.1+  
-**Status:** Draft Specification  
-**Philosophy:** TigerStyle - Safety, Performance, Developer Experience
-
-## TigerStyle Principles
-
-zdl follows TigerStyle discipline throughout:
-
-**Safety:**
-- Explicit bounds on all operations (no unbounded loops, allocations, or recursion)
-- Fail-fast on invalid input (assertions + error handling)
-- Fixed limits prevent resource exhaustion (max array size, nesting depth, etc.)
-- All memory ownership explicit (caller owns, must free)
-- Zero tolerance for compiler warnings
-
-**Performance:**
-- Designed for performance from day one (not optimized later)
-- Napkin math validates feasibility before implementation
-- Predictable execution paths (CPU cache-friendly, branch-predictor friendly)
-- Static allocation during init, minimal runtime allocation
-- Batched operations where possible
-
-**Developer Experience:**
-- Clear naming with units (timeout_ms, size_bytes)
-- Functions ≤70 lines (single responsibility)
-- Explicit control flow (no hidden complexity)
-- Complete documentation (why, not just what)
-- Zero technical debt (do it right the first time)
-
-## Overview
-
-zdl (Zero Data Layer) is a comptime-driven data serialization and schema evolution framework for Zig. It provides zero-overhead serialization to heterogeneous compute targets (CPU, GPU, disk, network, embedded) with type-safe migrations and powerful query capabilities.
-
-### Core Principles
-
-1. **Comptime everything** - All layout, validation, and migration logic resolved at compile time
-2. **Target-optimal** - Same logical schema compiles to optimal physical layouts per target
-3. **Zero parsing** - Serialized format IS the in-memory format where possible
-4. **Type safety** - Invalid schemas or missing migrations fail at comptime
-5. **Universal interop** - Single C library enables FFI to any language
-6. **No runtime dependencies** - Works on bare metal, WASM, or hosted environments
 
 ## Schema Definition
 
@@ -136,34 +236,30 @@ pub const User = struct {
     email: [64]u8,
     score: f32,
     created_at: u64,
-    
+
     pub const zdl_config = .{
         .version = 1,
     };
 };
 ```
 
-### Supported Field Types
+### Supported Types
 
-**Primitives (explicitly sized):**
+**Primitives:**
 - Integers: `u8`, `u16`, `u32`, `u64`, `u128`, `i8`, `i16`, `i32`, `i64`, `i128`
 - Floats: `f16`, `f32`, `f64`, `f128`
 - Bool: `bool`
 
 **Composites:**
-- Fixed arrays: `[N]T` where N is comptime-known and T is a supported type
-- Packed structs: For bit-level control
-- Nested structs: Other zdl schemas
+- Fixed arrays: `[N]T`
+- Packed structs
+- Nested structs
 
-**Restrictions (safety and predictability):**
-- No pointers (`*T`, `[*]T`) - prevents dangling references
-- No slices (`[]T`) - requires comptime-known sizes
-- No optional types (`?T`) - use sentinel values instead
-- No error unions in data fields - handle errors at API boundaries
-- No `usize` or architecture-dependent types - use explicit sizes (u32/u64)
-- All types must have comptime-known, fixed size
-- Maximum array size: 65,536 elements (prevents unbounded memory)
-- Maximum nesting depth: 8 levels (prevents stack overflow during traversal)
+**Restrictions:**
+- No pointers, slices, optionals, or error unions
+- No `usize` (use explicit `u32`/`u64`)
+- Max array size: 65,536 elements
+- Max nesting: 8 levels
 
 ### Target-Specific Layouts
 
@@ -172,26 +268,13 @@ pub const Signal = struct {
     timestamp: u64,
     values: [1024]f32,
     flags: u8,
-    
+
     pub const zdl_config = .{
         .version = 1,
         .layout = .{
-            .cpu = .{
-                .align_to = 64,        // Cache-line aligned
-                .simd_friendly = true,
-            },
-            .cuda = .{
-                .align_to = 128,       // Warp-coalesced
-                .soa = true,           // Structure-of-Arrays
-            },
-            .disk = .{
-                .align_to = 4096,      // Page-aligned for O_DIRECT
-                .packed = true,
-            },
-            .network = .{
-                .packed = true,
-                .big_endian = true,
-            },
+            .cpu = .{ .align_to = 64, .simd_friendly = true },
+            .disk = .{ .align_to = 4096, .packed = true },
+            .network = .{ .packed = true, .big_endian = true },
         },
     };
 };
@@ -199,22 +282,12 @@ pub const Signal = struct {
 
 ## Schema Evolution
 
-Sprint 3 introduces a *manual* migration helper. The framework validates that
-your schema declares explicit `from_vX` blocks and provides a thin wrapper that
-calls the user-supplied `up`/`down` functions. There is intentionally no
-automatic chain resolution yet—contributors chain migrations explicitly so the
-control flow stays obvious.
-
-### Defining Migrations
-
 ```zig
 pub const UserV1 = struct {
     id: u64,
     name: [32]u8,
-    
-    pub const zdl_config = .{
-        .version = 1,
-    };
+
+    pub const zdl_config = .{ .version = 1 };
 };
 
 pub const UserV2 = struct {
@@ -235,42 +308,18 @@ pub const UserV2 = struct {
                 }
 
                 pub fn down(v2: UserV2) UserV1 {
-                    return .{
-                        .id = v2.id,
-                        .name = v2.name,
-                    };
+                    return .{ .id = v2.id, .name = v2.name };
                 }
             },
         },
     };
 };
+
+// Usage
+const v2 = zdl.migrate(UserV1, UserV2, v1_data);
 ```
 
-### Using `zdl.migrate()`
-
-```zig
-const zdl = @import("zdl");
-
-const v1 = UserV1{ .id = 42, .name = my_name }; // version = 1
-const v2 = zdl.migrate(UserV1, UserV2, v1);     // invokes UserV2.zdl_config.migrations.from_v1.up
-const back_to_v1 = zdl.migrate(UserV2, UserV1, v2); // invokes down
-
-// Chaining remains explicit so contributors can audit migrations:
-const v3 = zdl.migrate(UserV2, UserV3, v2);
-```
-
-If a required migration is missing the build fails at comptime with a clear
-error. This keeps the current sprint lightweight while leaving the door open
-for automatic chaining in a later phase.
-
-## Changesets & Validation
-
-Sprint 4 layers structured validation ahead of serialization. Call
-`zdl.changeset.Changeset(T)` to get a bounded changeset builder that collects
-normalized field values plus validation errors (max 256 fields, 64 errors).
-Schema authors expose a helper under `zdl_config.changeset.validate` that pipes
-params through casting and validators, returning a changeset the caller must
-`deinit` once finished.
+## Validation
 
 ```zig
 pub const zdl_config = .{
@@ -291,17 +340,7 @@ pub const zdl_config = .{
 };
 ```
 
-Built-in helpers live under `zdl.validators` (email, url, alphanumeric). Keep
-user-defined checks pure and bounded—run them before calling
-`zdl.serialize.serialize`.
-
-## Querying Serialized Data
-
-Sprint 5 adds zero-copy querying over canonicalized payloads. Use
-`zdl.format.serializeArray(T, items, Target.cpu, allocator)` to emit an array
-container: `[Header][count: u64][items...]`. The header’s `length` tracks the
-item bytes while `format.arrayCount(bytes)` exposes the stored count. Query
-workflows build on this layout:
+## Querying
 
 ```zig
 var qb = zdl.query.query(Event, bytes, allocator);
@@ -313,36 +352,21 @@ _ = qb.limit(50);
 
 var it = try qb.iter();
 while (it.next()) |record| {
-    // record points directly into the serialized buffer
+    // Zero-copy pointer into serialized buffer
 }
-
-const top = try qb.collect();
-defer allocator.free(@constCast(top));
 ```
 
-## Multi-Target Layouts
+## Core Principles
 
-Payloads compile to per-target layouts via the `Target` enum. Disk writes align to 4 KB, network bytes are packed big-endian, and CPU keeps native padding. Use `zdl.layout.transform(T, bytes, from, to, allocator)` to convert raw payloads between targets without rehydrating headers, or round-trip through `serialize`/`deserialize` when headers are present.
+1. **Comptime everything** – Layout, validation, migration logic resolved at compile time
+2. **Target-optimal** – Same schema compiles to optimal layouts per target
+3. **Zero parsing** – Serialized format IS the in-memory format where possible
+4. **Type safety** – Invalid schemas fail at comptime
+5. **Universal interop** – C FFI enables any language to use zdl schemas
+6. **No runtime dependencies** – Works on bare metal, WASM, or hosted
 
-Filters are ANDed, bounds are explicit (`MAX_RESULTS = 1_000_000`,
-`MAX_FILTER_DEPTH = 8`), and iterators stream pointers without allocation. For
-array payloads the builder verifies counts, CRC32 checksums, and alignment before
-exposing the data window.
+---
 
-## Serialization Guarantees
-
-Serialized payloads are canonicalised before computing the CRC32 checksum so
-that Debug and ReleaseFast builds produce the same bytes even when struct
-padding differs. All schemas still obey the size and nesting limits outlined
-earlier.
-
-## Implementation Status
-
-The `tests/` tree mirrors `src/` and aggregates unit tests through
-`tests/main.zig`, which `zig build test` executes in both Debug and ReleaseFast
-modes via the build graph. Release validation runs via
-`zig build test -Doptimize=ReleaseFast --summary all` to ensure deterministic
-byte output and keep the CRC32 canonicalisation guard rails intact. Recent
-coverage includes `tests/core/changeset_test.zig`, `tests/core/validators_test.zig`,
-`tests/core/query_test.zig`, and the augmented integration exercises that now
-walk serialization → validation → query round-trips.
+**Version:** 0.1.0
+**Zig:** 0.15.1+
+**Philosophy:** TigerStyle – Safety, Performance, Developer Experience

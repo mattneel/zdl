@@ -15,10 +15,6 @@ const c_header_mod = @import("codegen/c_header.zig");
 const c_api_mod = @import("export/c_api.zig");
 const schemas_mod = @import("export/schemas.zig");
 
-comptime {
-    _ = c_api_mod;
-}
-
 pub const codegen = struct {
     pub const c_header = c_header_mod;
 };
@@ -26,6 +22,11 @@ pub const interop = struct {
     pub const c_api = c_api_mod;
     pub const schemas = schemas_mod;
 };
+
+/// Re-export for convenient access to C FFI types
+pub const SchemaDescriptor = c_api_mod.SchemaDescriptor;
+pub const exportCApi = c_api_mod.exportCApi;
+pub const getExportNames = c_api_mod.getExportNames;
 
 pub fn bufferedPrint() !void {
     var stdout_buffer: [1024]u8 = undefined;

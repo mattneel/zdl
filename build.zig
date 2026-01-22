@@ -49,7 +49,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     zdl_lib_module.link_libc = true;
-    zdl_lib_module.export_symbol_names = generateExportNames(b.allocator) catch @panic("OOM");
+    zdl_lib_module.export_symbol_names = generateExportNames();
 
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
@@ -209,19 +209,12 @@ pub fn build(b: *std.Build) void {
         bench_step.dependOn(&run_bench.step);
     }
 
-    const lib_output = b.pathJoin(&.{ "zig-out", "lib", "libzdl.so" });
-    const optimize_flag = b.fmt("-O{s}", .{@tagName(optimize)});
-    const emit_flag = b.fmt("-femit-bin={s}", .{lib_output});
-    const build_lib_cmd = b.addSystemCommand(&[_][]const u8{
-        "zig",
-        "build-lib",
-        "src/root.zig",
-        "-lc",
-        "-fPIC",
-        optimize_flag,
-        emit_flag,
+    const zdl_shared_lib = b.addLibrary(.{
+        .name = "zdl",
+        .linkage = .dynamic,
+        .root_module = zdl_lib_module,
     });
-    b.getInstallStep().dependOn(&build_lib_cmd.step);
+    b.installArtifact(zdl_shared_lib);
 
     const gen_headers_module = b.createModule(.{
         .root_source_file = b.path("tools/generate_headers.zig"),
@@ -256,17 +249,8 @@ pub fn build(b: *std.Build) void {
     // and reading its source code will allow you to master it.
 }
 
-fn generateExportNames(allocator: std.mem.Allocator) ![]const []const u8 {
-    var list = std.ArrayListUnmanaged([]const u8){};
-    defer list.deinit(allocator);
+const c_api = @import("src/export/c_api.zig");
 
-    inline for (schemas_pkg.registry) |entry| {
-        try list.append(allocator, std.fmt.comptimePrint("{s}_serialize", .{entry.c_prefix}));
-        try list.append(allocator, std.fmt.comptimePrint("{s}_deserialize", .{entry.c_prefix}));
-        try list.append(allocator, std.fmt.comptimePrint("{s}_free", .{entry.c_prefix}));
-        try list.append(allocator, std.fmt.comptimePrint("{s}_serialize_array", .{entry.c_prefix}));
-        try list.append(allocator, std.fmt.comptimePrint("{s}_array_count", .{entry.c_prefix}));
-    }
-
-    return list.toOwnedSlice(allocator);
+fn generateExportNames() []const []const u8 {
+    return c_api.getExportNames(&schemas_pkg.registry);
 }

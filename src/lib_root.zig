@@ -1,3 +1,6 @@
-const _ = @import("root.zig");
-const c_api = @import("export/c_api.zig");
-const _force_link = c_api.serializeForType;
+const zdl = @import("root.zig");
+const schemas = @import("export/schemas.zig");
+
+comptime {
+    zdl.interop.c_api.exportCApi(&schemas.registry);
+}

@@ -1,9 +1,18 @@
 const std = @import("std");
 const zdl = @import("../root.zig");
-const schemas = @import("schemas.zig");
 
 const Target = zdl.Target;
 const allocator = std.heap.c_allocator;
+
+/// Schema descriptor for C API export. Define a registry of these in your
+/// schemas module and pass it to `exportCApi`.
+pub const SchemaDescriptor = struct {
+    /// Type to expose through the C API.
+    Type: type,
+    /// Lowercase snake prefix used for function names and header files.
+    /// Example: "user" produces user_serialize, user_deserialize, etc.
+    c_prefix: []const u8,
+};
 
 fn toTarget(value: c_int) ?Target {
     const raw = std.math.cast(u8, value) orelse return null;
@@ -72,10 +81,29 @@ pub fn freeAlloc(ptr: ?*anyopaque) void {
     }
 }
 
-comptime {
-    for (schemas.registry) |entry| {
+/// Export C API functions for all schemas in the provided registry.
+/// Call this from a comptime block in your library root file:
+///
+/// ```zig
+/// const zdl = @import("zdl");
+/// const my_schemas = @import("my_schemas.zig");
+///
+/// comptime {
+///     zdl.interop.c_api.exportCApi(&my_schemas.registry);
+/// }
+/// ```
+///
+/// This generates the following C functions for each schema:
+/// - `{prefix}_serialize` - Serialize a struct to bytes
+/// - `{prefix}_deserialize` - Deserialize bytes to a struct
+/// - `{prefix}_free` - Free memory allocated by the API
+/// - `{prefix}_serialize_array` - Serialize an array of structs
+/// - `{prefix}_array_count` - Get count from serialized array bytes
+pub fn exportCApi(comptime registry: []const SchemaDescriptor) void {
+    for (registry) |entry| {
         const T = entry.Type;
         const prefix = entry.c_prefix;
+
         const SerializeWrapper = struct {
             fn call(value: ?*const T, target: c_int, out_len: ?*usize) callconv(.c) ?[*]u8 {
                 return serializeForType(T, value, target, out_len);
@@ -146,4 +174,19 @@ comptime {
             },
         );
     }
+}
+
+/// Generate the list of exported symbol names for a registry.
+/// Use this when configuring export_symbol_names on your library module in build.zig.
+pub fn getExportNames(comptime registry: []const SchemaDescriptor) []const []const u8 {
+    comptime var names: [registry.len * 5][]const u8 = undefined;
+    inline for (registry, 0..) |entry, i| {
+        names[i * 5 + 0] = std.fmt.comptimePrint("{s}_serialize", .{entry.c_prefix});
+        names[i * 5 + 1] = std.fmt.comptimePrint("{s}_deserialize", .{entry.c_prefix});
+        names[i * 5 + 2] = std.fmt.comptimePrint("{s}_free", .{entry.c_prefix});
+        names[i * 5 + 3] = std.fmt.comptimePrint("{s}_serialize_array", .{entry.c_prefix});
+        names[i * 5 + 4] = std.fmt.comptimePrint("{s}_array_count", .{entry.c_prefix});
+    }
+    const final = names;
+    return &final;
 }
