@@ -1,2 +1,6 @@
 zig-out/
 .zig-cache/
+
+# Compiled example binaries
+examples/c_usage/main
+examples/c_query/main
