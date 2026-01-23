@@ -21,20 +21,17 @@ pub fn generateHeader(comptime T: type, writer: anytype) !void {
     try writer.print("#ifndef {s}_H\n", .{guard});
     try writer.print("#define {s}_H\n\n", .{guard});
 
-    try writer.writeAll("#include <stdint.h>\n");
-    try writer.writeAll("#include <stddef.h>\n");
-    try writer.writeAll("#include <stdbool.h>\n\n");
-
-    try writer.writeAll("typedef enum {\n");
-    try writer.writeAll("    ZDL_TARGET_CPU = 0,\n");
-    try writer.writeAll("    ZDL_TARGET_DISK = 1,\n");
-    try writer.writeAll("    ZDL_TARGET_NETWORK = 2,\n");
-    try writer.writeAll("} zdl_target_t;\n\n");
+    try writer.writeAll("#include \"zdl.h\"\n\n");
 
     var emitted = std.StringHashMap(bool).init(arena_allocator);
     try emitStructTree(T, writer, &emitted, arena_allocator);
     try writer.writeByte('\n');
 
+    // Opaque query handle type
+    try writer.print("// Opaque query handle\n", .{});
+    try writer.print("struct {s}_query;\n\n", .{prefix});
+
+    // Serialization functions
     try writer.print("// Serialize to bytes (caller must free with {s}_free)\n", .{prefix});
     try writer.print(
         "uint8_t* {s}_serialize(const {s}* value, zdl_target_t target, size_t* out_len);\n\n",
@@ -59,6 +56,68 @@ pub fn generateHeader(comptime T: type, writer: anytype) !void {
     try writer.writeAll("// Read the array element count from serialized bytes\n");
     try writer.print("uint64_t {s}_array_count(const uint8_t* bytes, size_t len);\n\n", .{prefix});
 
+    // Query functions
+    try writer.writeAll("// ========== Query API ==========\n\n");
+
+    try writer.writeAll("// Create a new query handle from serialized array bytes\n");
+    try writer.print("struct {s}_query* {s}_query_new(const uint8_t* bytes, size_t len);\n\n", .{ prefix, prefix });
+
+    try writer.writeAll("// Free a query handle\n");
+    try writer.print("void {s}_query_free(struct {s}_query* q);\n\n", .{ prefix, prefix });
+
+    try writer.writeAll("// Add a filter on a uint64 field\n");
+    try writer.print("zdl_error_t {s}_query_filter_u64(struct {s}_query* q, const char* field, zdl_cmp_t cmp, uint64_t value);\n\n", .{ prefix, prefix });
+
+    try writer.writeAll("// Add a filter on an int64 field\n");
+    try writer.print("zdl_error_t {s}_query_filter_i64(struct {s}_query* q, const char* field, zdl_cmp_t cmp, int64_t value);\n\n", .{ prefix, prefix });
+
+    try writer.writeAll("// Add a filter on a float field\n");
+    try writer.print("zdl_error_t {s}_query_filter_f32(struct {s}_query* q, const char* field, zdl_cmp_t cmp, float value);\n\n", .{ prefix, prefix });
+
+    try writer.writeAll("// Add a filter on a double field\n");
+    try writer.print("zdl_error_t {s}_query_filter_f64(struct {s}_query* q, const char* field, zdl_cmp_t cmp, double value);\n\n", .{ prefix, prefix });
+
+    try writer.writeAll("// Add a filter on a bool field\n");
+    try writer.print("zdl_error_t {s}_query_filter_bool(struct {s}_query* q, const char* field, zdl_cmp_t cmp, bool value);\n\n", .{ prefix, prefix });
+
+    try writer.writeAll("// Set the maximum number of results to return\n");
+    try writer.print("zdl_error_t {s}_query_limit(struct {s}_query* q, size_t limit);\n\n", .{ prefix, prefix });
+
+    try writer.writeAll("// Set the number of results to skip (offset)\n");
+    try writer.print("zdl_error_t {s}_query_offset(struct {s}_query* q, size_t offset);\n\n", .{ prefix, prefix });
+
+    try writer.print("// Collect all matching results into a malloc'd array (caller must free with {s}_free)\n", .{prefix});
+    try writer.print("{s}* {s}_query_collect(struct {s}_query* q, size_t* out_count);\n\n", .{ simple_name, prefix, prefix });
+
+    try writer.writeAll("// Count matching results without materializing them\n");
+    try writer.print("uint64_t {s}_query_count(struct {s}_query* q);\n\n", .{ prefix, prefix });
+
+    try writer.writeAll("// Initialize the iterator (must be called before iter_next)\n");
+    try writer.print("zdl_error_t {s}_query_iter_start(struct {s}_query* q);\n\n", .{ prefix, prefix });
+
+    try writer.writeAll("// Get the next matching item (returns NULL when done)\n");
+    try writer.writeAll("// NOTE: Returned pointer is valid only until the next iter_next call\n");
+    try writer.writeAll("// NOTE: Returned pointer is valid only while the query handle is alive\n");
+    try writer.print("const {s}* {s}_query_iter_next(struct {s}_query* q);\n\n", .{ simple_name, prefix, prefix });
+
+    try writer.writeAll("// Reset the iterator to the beginning\n");
+    try writer.print("void {s}_query_iter_reset(struct {s}_query* q);\n\n", .{ prefix, prefix });
+
+    // Introspection functions
+    try writer.writeAll("// ========== Introspection API ==========\n\n");
+
+    try writer.writeAll("// Get the number of fields in the struct\n");
+    try writer.print("size_t {s}_field_count(void);\n\n", .{prefix});
+
+    try writer.writeAll("// Get field info by index (returns NULL if index out of bounds)\n");
+    try writer.print("const zdl_field_info_t* {s}_field_info(size_t index);\n\n", .{prefix});
+
+    try writer.writeAll("// Get field info by name (returns NULL if not found)\n");
+    try writer.print("const zdl_field_info_t* {s}_field_by_name(const char* name);\n\n", .{prefix});
+
+    try writer.writeAll("// Get the size of the struct in bytes\n");
+    try writer.print("size_t {s}_struct_size(void);\n\n", .{prefix});
+
     try writer.print("#endif // {s}_H\n", .{guard});
 }
 
@@ -66,7 +125,7 @@ fn emitStructDefinition(
     comptime T: type,
     comptime name: []const u8,
     writer: anytype,
-    allocator: std.mem.Allocator,
+    alloc: std.mem.Allocator,
 ) !void {
     try writer.print("typedef struct {s} {{\n", .{name});
 
@@ -74,7 +133,7 @@ fn emitStructDefinition(
     inline for (fields) |field| {
         if (field.is_comptime) continue;
 
-        try emitField(field.type, field.name, 1, writer, allocator);
+        try emitField(field.type, field.name, 1, writer, alloc);
     }
 
     try writer.print("}} {s};\n", .{name});
@@ -85,11 +144,11 @@ fn emitField(
     comptime field_name: []const u8,
     indent_level: usize,
     writer: anytype,
-    allocator: std.mem.Allocator,
+    alloc: std.mem.Allocator,
 ) !void {
     switch (@typeInfo(FieldType)) {
         .bool, .int, .float, .array => {
-            const fragments = try toCType(FieldType, allocator);
+            const fragments = try toCType(FieldType, alloc);
             try writeIndent(writer, indent_level);
             try writer.print("{s} {s}{s};\n", .{ fragments.prefix, field_name, fragments.suffix });
         },
@@ -114,7 +173,7 @@ const CTypeFragments = struct {
     suffix: []const u8,
 };
 
-fn toCType(comptime T: type, allocator: std.mem.Allocator) CGenError!CTypeFragments {
+fn toCType(comptime T: type, alloc: std.mem.Allocator) CGenError!CTypeFragments {
     return switch (@typeInfo(T)) {
         .bool => .{ .prefix = "bool", .suffix = "" },
         .int => |info| switch (info.bits) {
@@ -142,8 +201,8 @@ fn toCType(comptime T: type, allocator: std.mem.Allocator) CGenError!CTypeFragme
             else => CGenError.UnsupportedType,
         },
         .array => |info| blk: {
-            const child = try toCType(info.child, allocator);
-            const suffix = try std.fmt.allocPrint(allocator, "{s}[{d}]", .{ child.suffix, info.len });
+            const child = try toCType(info.child, alloc);
+            const suffix = try std.fmt.allocPrint(alloc, "{s}[{d}]", .{ child.suffix, info.len });
             break :blk CTypeFragments{ .prefix = child.prefix, .suffix = suffix };
         },
         .@"struct" => CTypeFragments{ .prefix = simplifyTypeName(@typeName(T)), .suffix = "" },
@@ -159,8 +218,8 @@ pub fn simplifyTypeName(comptime full_name: []const u8) []const u8 {
     return full_name[start..];
 }
 
-fn upperSnake(allocator: std.mem.Allocator, name: []const u8) ![]const u8 {
-    const buf = try allocator.alloc(u8, name.len * 2);
+fn upperSnake(alloc: std.mem.Allocator, name: []const u8) ![]const u8 {
+    const buf = try alloc.alloc(u8, name.len * 2);
     var len: usize = 0;
 
     for (name, 0..) |c, idx| {
@@ -175,8 +234,8 @@ fn upperSnake(allocator: std.mem.Allocator, name: []const u8) ![]const u8 {
     return buf[0..len];
 }
 
-fn lowerSnake(allocator: std.mem.Allocator, name: []const u8) ![]const u8 {
-    const buf = try allocator.alloc(u8, name.len * 2);
+fn lowerSnake(alloc: std.mem.Allocator, name: []const u8) ![]const u8 {
+    const buf = try alloc.alloc(u8, name.len * 2);
     var len: usize = 0;
 
     for (name, 0..) |c, idx| {
@@ -194,7 +253,7 @@ fn emitStructTree(
     comptime T: type,
     writer: anytype,
     emitted: *std.StringHashMap(bool),
-    allocator: std.mem.Allocator,
+    alloc: std.mem.Allocator,
 ) !void {
     const full_name = @typeName(T);
     const entry = try emitted.getOrPut(full_name);
@@ -207,11 +266,11 @@ fn emitStructTree(
 
     inline for (std.meta.fields(T)) |field| {
         if (field.is_comptime) continue;
-        try processType(field.type, writer, emitted, allocator);
+        try processType(field.type, writer, emitted, alloc);
     }
 
     const simple = comptime simplifyTypeName(full_name);
-    try emitStructDefinition(T, simple, writer, allocator);
+    try emitStructDefinition(T, simple, writer, alloc);
     try writer.writeByte('\n');
     entry.value_ptr.* = true;
 }
@@ -220,11 +279,11 @@ fn processType(
     comptime T: type,
     writer: anytype,
     emitted: *std.StringHashMap(bool),
-    allocator: std.mem.Allocator,
+    alloc: std.mem.Allocator,
 ) !void {
     switch (@typeInfo(T)) {
-        .@"struct" => try emitStructTree(T, writer, emitted, allocator),
-        .array => |info| try processType(info.child, writer, emitted, allocator),
+        .@"struct" => try emitStructTree(T, writer, emitted, alloc),
+        .array => |info| try processType(info.child, writer, emitted, alloc),
         else => {},
     }
 }

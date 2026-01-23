@@ -236,6 +236,25 @@ pub fn build(b: *std.Build) void {
     gen_headers_step.dependOn(&run_gen_headers.step);
     b.getInstallStep().dependOn(&run_gen_headers.step);
 
+    // Python binding generator
+    const gen_python_module = b.createModule(.{
+        .root_source_file = b.path("tools/gen_python.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "zdl", .module = zdl_module }},
+    });
+
+    const gen_python = b.addExecutable(.{
+        .name = "gen-python",
+        .root_module = gen_python_module,
+    });
+
+    const run_gen_python = b.addRunArtifact(gen_python);
+    run_gen_python.addArg("zig-out/python");
+
+    const gen_python_step = b.step("gen-python", "Generate Python bindings");
+    gen_python_step.dependOn(&run_gen_python.step);
+
     // Just like flags, top level steps are also listed in the `--help` menu.
     //
     // The Zig build system is entirely implemented in userland, which means

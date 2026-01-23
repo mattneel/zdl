@@ -12,14 +12,18 @@ pub const validators = @import("core/validators.zig");
 pub const query = @import("core/query.zig");
 pub const layout = @import("core/layout.zig");
 const c_header_mod = @import("codegen/c_header.zig");
+const c_common_mod = @import("codegen/c_common.zig");
 const c_api_mod = @import("export/c_api.zig");
+const c_error_mod = @import("export/c_error.zig");
 const schemas_mod = @import("export/schemas.zig");
 
 pub const codegen = struct {
     pub const c_header = c_header_mod;
+    pub const c_common = c_common_mod;
 };
 pub const interop = struct {
     pub const c_api = c_api_mod;
+    pub const c_error = c_error_mod;
     pub const schemas = schemas_mod;
 };
 

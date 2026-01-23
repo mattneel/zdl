@@ -43,8 +43,8 @@
 
 ---
 
-## Phase 2: Multi-Target & Bindings (v0.2.0)
-**Goal:** Cross-platform reliability and language bindings
+## Phase 2: C API Layer & Language Bindings (v0.2.0) ✅
+**Goal:** Full C FFI with query, introspection, and Python bindings
 
 ### Must Have
 - [x] Target-specific layouts
@@ -54,20 +54,37 @@
 - [x] Endianness handling
   - Explicit conversion functions
   - No implicit conversions
+- [x] C API Query System
+  - QueryHandle with lifecycle management
+  - Typed filters (u64, i64, f32, f64, bool)
+  - Limit/offset pagination
+  - Batch collect and count
+  - Iterator API (start, next, reset)
+- [x] Schema Introspection
+  - FieldInfo struct with type, offset, size
+  - field_count, field_info, field_by_name, struct_size
+  - Runtime type identification
+- [x] Thread-local Error Handling
+  - Error codes enum
+  - zdl_last_error() and zdl_error_message()
+- [x] Common Header Generation
+  - zdl.h with shared types
+  - Per-schema headers include zdl.h
+- [x] Python bindings
+  - ctypes-based with dataclass wrappers
+  - Query class with fluent API
+  - Type hints for IDE support
+  - `zig build gen-python`
 - [ ] TypeScript bindings (Bun FFI)
   - Memory ownership documented
   - Error handling examples
   - Zero unsafe casts
-- [ ] Python bindings
-  - Type hints
-  - Memory safety
-  - GC-friendly
 
 ### Success Criteria
 - Works on: x86_64-linux, x86_64-macos, aarch64-linux
 - Cross-target serialization validated
-- Fuzzer covers all targets
-- Benchmarks show consistent performance
+- 25 functions per schema exported
+- Python bindings pass import and round-trip tests
 - No undefined behavior (UBSAN clean)
 
 ### Timeline
@@ -105,7 +122,7 @@
 
 ---
 
-## Phase 4: Query Engine (v0.4.0)
+## Phase 4: Query Engine Optimization (v0.4.0)
 **Goal:** Fast, safe data access
 
 ### Must Have
@@ -113,7 +130,7 @@
   - Max result set: 1M records
   - Max filter depth: 8 levels
   - Explicit `.limit()` required
-- [ ] Iterator interface
+- [x] Iterator interface
   - Zero-copy views
   - Bounded iteration
   - No hidden allocations
@@ -198,7 +215,7 @@
 
 ---
 
-## Phase 7: Bindings (v0.7.0)
+## Phase 7: Additional Language Bindings (v0.7.0)
 **Goal:** Universal accessibility
 
 ### Must Have
@@ -206,14 +223,14 @@
   - Safe wrappers
   - Lifetime correct
   - Zero unsafe (in public API)
-- [ ] Python bindings
-  - Type hints
-  - Memory safety
-  - GC-friendly
 - [ ] Go bindings
   - Idiomatic API
   - Error handling
   - CGo optimized
+- [ ] TypeScript bindings
+  - Bun FFI or WASM
+  - Type-safe wrappers
+  - Async support
 
 ### Success Criteria
 - Feels native in each language
