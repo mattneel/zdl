@@ -47,7 +47,15 @@ pub fn generateCommonHeader(writer: anytype) !void {
         \\    ZDL_ERR_LIMIT_REQUIRED = 7, // Limit required for collect operation
         \\    ZDL_ERR_TOO_MANY_FILTERS = 8, // Too many filters applied
         \\    ZDL_ERR_ITER_NOT_STARTED = 9, // Iterator not started
-        \\    ZDL_ERR_UNSUPPORTED_TYPE = 10 // Unsupported field type for filtering
+        \\    ZDL_ERR_UNSUPPORTED_TYPE = 10, // Unsupported field type for filtering
+        \\    ZDL_ERR_CAPACITY_FULL = 11,    // Container capacity full (call reserve)
+        \\    ZDL_ERR_STALE_VIEW = 12,       // View invalidated by compact/reserve fence
+        \\    ZDL_ERR_SLOT_OUT_OF_RANGE = 13, // Slot index out of range
+        \\    ZDL_ERR_SLOT_DELETED = 14,     // Record at slot is deleted
+        \\    ZDL_ERR_CHECKSUM = 15,         // Record or container checksum mismatch
+        \\    ZDL_ERR_VERSION = 16,          // Container schema version mismatch
+        \\    ZDL_ERR_BUFFER_TOO_SMALL = 17, // Destination buffer too small
+        \\    ZDL_ERR_DATA_TOO_LARGE = 18    // Data exceeds maximum container size
         \\} zdl_error_t;
         \\
         \\// Field type codes for introspection

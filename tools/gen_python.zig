@@ -130,6 +130,14 @@ fn generatePythonModule(writer: anytype) !void {
         \\    TOO_MANY_FILTERS = 8
         \\    ITERATOR_NOT_STARTED = 9
         \\    UNSUPPORTED_TYPE = 10
+        \\    CAPACITY_FULL = 11
+        \\    STALE_VIEW = 12
+        \\    SLOT_OUT_OF_RANGE = 13
+        \\    SLOT_DELETED = 14
+        \\    CHECKSUM_MISMATCH = 15
+        \\    VERSION_MISMATCH = 16
+        \\    BUFFER_TOO_SMALL = 17
+        \\    DATA_TOO_LARGE = 18
         \\
         \\
         \\class FieldType(IntEnum):
@@ -306,6 +314,65 @@ fn generateSchemaClass(comptime T: type, comptime prefix: []const u8, writer: an
 
     try writer.print("_lib.{s}_struct_size.restype = c_size_t\n", .{prefix});
     try writer.print("_lib.{s}_struct_size.argtypes = []\n\n", .{prefix});
+
+    // Zero-alloc serialize
+    try writer.print("_lib.{s}_serialize_into.restype = c_int\n", .{prefix});
+    try writer.print("_lib.{s}_serialize_into.argtypes = [POINTER(_{s}Struct), POINTER(c_uint8), c_size_t, c_int, POINTER(c_size_t)]\n\n", .{ prefix, type_name });
+
+    try writer.print("_lib.{s}_serialized_size.restype = c_size_t\n", .{prefix});
+    try writer.print("_lib.{s}_serialized_size.argtypes = [c_int]\n\n", .{prefix});
+
+    // Mutable container functions
+    try writer.print("_lib.{s}_mut_new.restype = c_void_p\n", .{prefix});
+    try writer.print("_lib.{s}_mut_new.argtypes = [c_size_t]\n\n", .{prefix});
+
+    try writer.print("_lib.{s}_mut_load.restype = c_void_p\n", .{prefix});
+    try writer.print("_lib.{s}_mut_load.argtypes = [POINTER(c_uint8), c_size_t, c_size_t]\n\n", .{prefix});
+
+    try writer.print("_lib.{s}_mut_free.restype = None\n", .{prefix});
+    try writer.print("_lib.{s}_mut_free.argtypes = [c_void_p]\n\n", .{prefix});
+
+    try writer.print("_lib.{s}_mut_append.restype = c_int\n", .{prefix});
+    try writer.print("_lib.{s}_mut_append.argtypes = [c_void_p, POINTER(_{s}Struct), POINTER(c_size_t)]\n\n", .{ prefix, type_name });
+
+    try writer.print("_lib.{s}_mut_get.restype = POINTER(_{s}Struct)\n", .{ prefix, type_name });
+    try writer.print("_lib.{s}_mut_get.argtypes = [c_void_p, c_size_t]\n\n", .{prefix});
+
+    try writer.print("_lib.{s}_mut_get_verified.restype = c_int\n", .{prefix});
+    try writer.print("_lib.{s}_mut_get_verified.argtypes = [c_void_p, c_size_t, POINTER(_{s}Struct)]\n\n", .{ prefix, type_name });
+
+    try writer.print("_lib.{s}_mut_update.restype = c_int\n", .{prefix});
+    try writer.print("_lib.{s}_mut_update.argtypes = [c_void_p, c_size_t, POINTER(_{s}Struct)]\n\n", .{ prefix, type_name });
+
+    try writer.print("_lib.{s}_mut_delete.restype = c_int\n", .{prefix});
+    try writer.print("_lib.{s}_mut_delete.argtypes = [c_void_p, c_size_t]\n\n", .{prefix});
+
+    try writer.print("_lib.{s}_mut_compact.restype = None\n", .{prefix});
+    try writer.print("_lib.{s}_mut_compact.argtypes = [c_void_p]\n\n", .{prefix});
+
+    try writer.print("_lib.{s}_mut_reserve.restype = c_int\n", .{prefix});
+    try writer.print("_lib.{s}_mut_reserve.argtypes = [c_void_p, c_size_t]\n\n", .{prefix});
+
+    try writer.print("_lib.{s}_mut_len.restype = c_size_t\n", .{prefix});
+    try writer.print("_lib.{s}_mut_len.argtypes = [c_void_p]\n\n", .{prefix});
+
+    try writer.print("_lib.{s}_mut_live.restype = c_size_t\n", .{prefix});
+    try writer.print("_lib.{s}_mut_live.argtypes = [c_void_p]\n\n", .{prefix});
+
+    try writer.print("_lib.{s}_mut_generation.restype = c_uint64\n", .{prefix});
+    try writer.print("_lib.{s}_mut_generation.argtypes = [c_void_p]\n\n", .{prefix});
+
+    try writer.print("_lib.{s}_mut_flush.restype = POINTER(c_uint8)\n", .{prefix});
+    try writer.print("_lib.{s}_mut_flush.argtypes = [c_void_p, POINTER(c_size_t)]\n\n", .{prefix});
+
+    try writer.print("_lib.{s}_mut_iter_start.restype = c_int\n", .{prefix});
+    try writer.print("_lib.{s}_mut_iter_start.argtypes = [c_void_p]\n\n", .{prefix});
+
+    try writer.print("_lib.{s}_mut_iter_next.restype = POINTER(_{s}Struct)\n", .{ prefix, type_name });
+    try writer.print("_lib.{s}_mut_iter_next.argtypes = [c_void_p]\n\n", .{prefix});
+
+    try writer.print("_lib.{s}_mut_iter_reset.restype = None\n", .{prefix});
+    try writer.print("_lib.{s}_mut_iter_reset.argtypes = [c_void_p]\n\n", .{prefix});
 
     // Generate the dataclass
     try writer.print(
@@ -638,6 +705,148 @@ fn generateSchemaClass(comptime T: type, comptime prefix: []const u8, writer: an
         \\
         \\
     , .{prefix});
+
+    // Generate the Mutable container class
+    try writer.print(
+        \\
+        \\class {s}Mutable:
+        \\    """
+        \\    Mutable container of {s} records (in-memory CRUD).
+        \\
+        \\    Integrity is tracked per record (CRC sidecar); deletes are
+        \\    tombstones; compact() reclaims them. All reads return copies, so
+        \\    Python code never holds pointers into container storage.
+        \\
+        \\    Usage:
+        \\        mc = {s}Mutable(capacity=1024)
+        \\        slot = mc.append({s}(...))
+        \\        mc.update(slot, {s}(...))
+        \\        mc.delete(slot)
+        \\        mc.compact()
+        \\        data = mc.flush()           # serialized array container
+        \\        mc2 = {s}Mutable.load(data)
+        \\    """
+        \\
+        \\    def __init__(self, capacity: int = 16):
+        \\        """Create an empty mutable container with the given capacity."""
+        \\        self._handle = _lib.{s}_mut_new(capacity)
+        \\        if not self._handle:
+        \\            raise ZdlException(_get_last_error())
+        \\
+        \\    @classmethod
+        \\    def load(cls, data: bytes, extra_capacity: int = 0) -> "{s}Mutable":
+        \\        """Load a serialized array container (validates container CRC)."""
+        \\        buf = (c_uint8 * len(data)).from_buffer_copy(data)
+        \\        handle = _lib.{s}_mut_load(buf, len(data), extra_capacity)
+        \\        if not handle:
+        \\            raise ZdlException(_get_last_error())
+        \\        obj = cls.__new__(cls)
+        \\        obj._handle = handle
+        \\        return obj
+        \\
+        \\    def __del__(self):
+        \\        if hasattr(self, "_handle") and self._handle:
+        \\            _lib.{s}_mut_free(self._handle)
+        \\            self._handle = None
+        \\
+        \\    def __enter__(self) -> "{s}Mutable":
+        \\        return self
+        \\
+        \\    def __exit__(self, *args) -> None:
+        \\        if self._handle:
+        \\            _lib.{s}_mut_free(self._handle)
+        \\            self._handle = None
+        \\
+    , .{ type_name, type_name, type_name, type_name, type_name, type_name, prefix, type_name, prefix, prefix, type_name, prefix });
+
+    try writer.print(
+        \\
+        \\    def append(self, item: "{s}") -> int:
+        \\        """Append a record; returns its slot. Raises CAPACITY_FULL
+        \\        when out of room (call reserve() first)."""
+        \\        s = item._to_struct()
+        \\        out_slot = c_size_t()
+        \\        _check_error(_lib.{s}_mut_append(self._handle, byref(s), byref(out_slot)))
+        \\        return out_slot.value
+        \\
+        \\    def get(self, slot: int) -> "{s}":
+        \\        """Read the record at slot (copy)."""
+        \\        ptr = _lib.{s}_mut_get(self._handle, slot)
+        \\        if not ptr:
+        \\            raise ZdlException(_get_last_error())
+        \\        return {s}._from_struct(ptr.contents)
+        \\
+        \\    def get_verified(self, slot: int) -> "{s}":
+        \\        """Integrity-checked read: verifies the record CRC (copy)."""
+        \\        out = _{s}Struct()
+        \\        _check_error(_lib.{s}_mut_get_verified(self._handle, slot, byref(out)))
+        \\        return {s}._from_struct(out)
+        \\
+        \\    def update(self, slot: int, item: "{s}") -> None:
+        \\        """In-place update; re-CRCs exactly one record."""
+        \\        s = item._to_struct()
+        \\        _check_error(_lib.{s}_mut_update(self._handle, slot, byref(s)))
+        \\
+        \\    def delete(self, slot: int) -> None:
+        \\        """Tombstone delete: no bytes move; compact() reclaims."""
+        \\        _check_error(_lib.{s}_mut_delete(self._handle, slot))
+        \\
+        \\    def compact(self) -> None:
+        \\        """Reclaim tombstones (relocation fence; order preserved)."""
+        \\        _lib.{s}_mut_compact(self._handle)
+        \\
+        \\    def reserve(self, additional: int) -> None:
+        \\        """Grow capacity (relocation fence; failure-atomic)."""
+        \\        _check_error(_lib.{s}_mut_reserve(self._handle, additional))
+        \\
+    , .{ type_name, prefix, type_name, prefix, type_name, type_name, type_name, prefix, type_name, type_name, prefix, prefix, prefix, prefix });
+
+    try writer.print(
+        \\
+        \\    @property
+        \\    def live(self) -> int:
+        \\        """Live (non-deleted) record count."""
+        \\        return _lib.{s}_mut_live(self._handle)
+        \\
+        \\    @property
+        \\    def slots(self) -> int:
+        \\        """Slots in use, including tombstoned ones."""
+        \\        return _lib.{s}_mut_len(self._handle)
+        \\
+        \\    @property
+        \\    def generation(self) -> int:
+        \\        """Bumped whenever a fence (compact/reserve) relocates storage."""
+        \\        return _lib.{s}_mut_generation(self._handle)
+        \\
+        \\    def __len__(self) -> int:
+        \\        return self.live
+        \\
+        \\    def flush(self) -> bytes:
+        \\        """Serialize live records to an array container (bytes)."""
+        \\        out_len = c_size_t()
+        \\        ptr = _lib.{s}_mut_flush(self._handle, byref(out_len))
+        \\        if not ptr:
+        \\            raise ZdlException(_get_last_error())
+        \\        try:
+        \\            return bytes(ptr[:out_len.value])
+        \\        finally:
+        \\            _lib.{s}_free(ptr)
+        \\
+        \\    def __iter__(self) -> Iterator[{s}]:
+        \\        """Iterate live records in slot order (copies). Raises
+        \\        STALE_VIEW if compact()/reserve() runs mid-iteration."""
+        \\        _check_error(_lib.{s}_mut_iter_start(self._handle))
+        \\        while True:
+        \\            ptr = _lib.{s}_mut_iter_next(self._handle)
+        \\            if not ptr:
+        \\                err = _get_last_error()
+        \\                if err != ZdlError.OK:
+        \\                    raise ZdlException(err)
+        \\                break
+        \\            yield {s}._from_struct(ptr.contents)
+        \\
+        \\
+    , .{ prefix, prefix, prefix, prefix, prefix, type_name, prefix, prefix, type_name });
 }
 
 fn ctypeForZigType(comptime T: type) []const u8 {

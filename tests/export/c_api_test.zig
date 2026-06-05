@@ -313,3 +313,153 @@ test "filter f32 values" {
         c_api.freeAlloc(@ptrCast(r));
     }
 }
+
+test "serialize_into writes into caller buffer and reports BufferTooSmall" {
+    var sample = Sample{
+        .id = 7,
+        .value = 1.5,
+        .name = [_]u8{ 'x', 0, 0, 0, 0, 0, 0, 0 },
+    };
+    const target_value: c_int = @intCast(@intFromEnum(Target.cpu));
+
+    const needed = c_api.serializedSizeForType(Sample, target_value);
+    try testing.expect(needed > 0);
+
+    var buf: [4096]u8 = undefined;
+    var out_len: usize = 0;
+    const code = c_api.serializeIntoForType(Sample, &sample, &buf, buf.len, target_value, &out_len);
+    try testing.expectEqual(@intFromEnum(c_error.Error.ok), code);
+    try testing.expectEqual(needed, out_len);
+
+    // byte-identical to the allocating path
+    var heap_len: usize = 0;
+    const heap_ptr = c_api.serializeForType(Sample, &sample, target_value, &heap_len);
+    try testing.expect(heap_ptr != null);
+    try testing.expectEqual(out_len, heap_len);
+    try testing.expectEqualSlices(u8, heap_ptr.?[0..heap_len], buf[0..out_len]);
+    c_api.freeAlloc(@ptrCast(heap_ptr.?));
+
+    // undersized buffer
+    var small: [4]u8 = undefined;
+    const small_code = c_api.serializeIntoForType(Sample, &sample, &small, small.len, target_value, &out_len);
+    try testing.expectEqual(@intFromEnum(c_error.Error.buffer_too_small), small_code);
+    try testing.expectEqual(c_error.Error.buffer_too_small, c_error.getError());
+}
+
+test "mutable handle: full CRUD lifecycle through the C surface" {
+    const MH = c_api.MutableHandle(Sample);
+
+    const handle = MH.init(8);
+    try testing.expect(handle != null);
+    defer MH.deinit(handle);
+
+    // append
+    var rec = Sample{ .id = 1, .value = 1.0, .name = [_]u8{0} ** 8 };
+    var slot: usize = 0;
+    try testing.expectEqual(@intFromEnum(c_error.Error.ok), MH.append(handle, &rec, &slot));
+    rec.id = 2;
+    try testing.expectEqual(@intFromEnum(c_error.Error.ok), MH.append(handle, &rec, &slot));
+    try testing.expectEqual(@as(usize, 1), slot);
+    try testing.expectEqual(@as(usize, 2), MH.liveOf(handle));
+
+    // get (zero-copy) and get_verified (copy)
+    const p = MH.get(handle, 0);
+    try testing.expect(p != null);
+    try testing.expectEqual(@as(u64, 1), p.?.id);
+    var out: Sample = undefined;
+    try testing.expectEqual(@intFromEnum(c_error.Error.ok), MH.getVerified(handle, 1, &out));
+    try testing.expectEqual(@as(u64, 2), out.id);
+
+    // update
+    rec.id = 22;
+    try testing.expectEqual(@intFromEnum(c_error.Error.ok), MH.update(handle, 1, &rec));
+    try testing.expectEqual(@intFromEnum(c_error.Error.ok), MH.getVerified(handle, 1, &out));
+    try testing.expectEqual(@as(u64, 22), out.id);
+
+    // delete + error codes
+    try testing.expectEqual(@intFromEnum(c_error.Error.ok), MH.del(handle, 0));
+    try testing.expectEqual(@intFromEnum(c_error.Error.slot_deleted), MH.del(handle, 0));
+    try testing.expectEqual(@intFromEnum(c_error.Error.slot_out_of_range), MH.del(handle, 99));
+    try testing.expect(MH.get(handle, 0) == null);
+    try testing.expectEqual(c_error.Error.slot_deleted, c_error.getError());
+
+    // capacity
+    var fill = Sample{ .id = 100, .value = 0, .name = [_]u8{0} ** 8 };
+    while (MH.append(handle, &fill, null) == @intFromEnum(c_error.Error.ok)) {}
+    try testing.expectEqual(c_error.Error.capacity_full, c_error.getError());
+    try testing.expectEqual(@intFromEnum(c_error.Error.ok), MH.reserve(handle, 8));
+    try testing.expectEqual(@intFromEnum(c_error.Error.ok), MH.append(handle, &fill, null));
+
+    // compact reclaims the tombstone
+    const live_before = MH.liveOf(handle);
+    MH.compact(handle);
+    try testing.expectEqual(live_before, MH.lenOf(handle));
+}
+
+test "mutable handle: iterator reports stale_view after a fence" {
+    const MH = c_api.MutableHandle(Sample);
+
+    const handle = MH.init(8);
+    try testing.expect(handle != null);
+    defer MH.deinit(handle);
+
+    var rec = Sample{ .id = 0, .value = 0, .name = [_]u8{0} ** 8 };
+    var i: u64 = 0;
+    while (i < 4) : (i += 1) {
+        rec.id = i;
+        _ = MH.append(handle, &rec, null);
+    }
+
+    try testing.expectEqual(@intFromEnum(c_error.Error.ok), MH.iterStart(handle));
+    try testing.expect(MH.iterNext(handle) != null);
+
+    // fence mid-iteration
+    MH.compact(handle);
+    try testing.expect(MH.iterNext(handle) == null);
+    try testing.expectEqual(c_error.Error.stale_view, c_error.getError());
+
+    // restart works and runs to honest end-of-iteration
+    try testing.expectEqual(@intFromEnum(c_error.Error.ok), MH.iterStart(handle));
+    var seen: usize = 0;
+    while (MH.iterNext(handle)) |_| seen += 1;
+    try testing.expectEqual(@as(usize, 4), seen);
+    try testing.expectEqual(c_error.Error.ok, c_error.getError());
+}
+
+test "mutable handle: load/flush round-trips wire bytes" {
+    const MH = c_api.MutableHandle(Sample);
+
+    var items = [_]Sample{
+        .{ .id = 1, .value = 1.0, .name = [_]u8{0} ** 8 },
+        .{ .id = 2, .value = 2.0, .name = [_]u8{0} ** 8 },
+        .{ .id = 3, .value = 3.0, .name = [_]u8{0} ** 8 },
+    };
+    var wire_len: usize = 0;
+    const wire = c_api.serializeArrayForType(Sample, items[0..].ptr, items.len, @intCast(@intFromEnum(Target.cpu)), &wire_len);
+    try testing.expect(wire != null);
+    defer c_api.freeAlloc(@ptrCast(wire.?));
+
+    const handle = MH.load(wire, wire_len, 4);
+    try testing.expect(handle != null);
+    defer MH.deinit(handle);
+    try testing.expectEqual(@as(usize, 3), MH.liveOf(handle));
+
+    try testing.expectEqual(@intFromEnum(c_error.Error.ok), MH.del(handle, 1));
+
+    var out_len: usize = 0;
+    const flushed = MH.flush(handle, &out_len);
+    try testing.expect(flushed != null);
+    defer c_api.freeAlloc(@ptrCast(flushed.?));
+
+    try testing.expectEqual(@as(u64, 2), c_api.arrayCountFromBytes(flushed, out_len));
+}
+
+test "export names cover 42 functions per schema" {
+    const registry = [_]c_api.SchemaDescriptor{
+        .{ .Type = Sample, .c_prefix = "sample" },
+    };
+    const names = comptime c_api.getExportNames(&registry);
+    try testing.expectEqual(@as(usize, 42 + 2), names.len);
+    try testing.expectEqualStrings("sample_mut_iter_reset", names[names.len - 1]);
+    try testing.expectEqualStrings("sample_serialize_into", names[2 + 23]);
+}

@@ -27,9 +27,11 @@ pub fn generateHeader(comptime T: type, writer: anytype) !void {
     try emitStructTree(T, writer, &emitted, arena_allocator);
     try writer.writeByte('\n');
 
-    // Opaque query handle type
+    // Opaque handle types
     try writer.print("// Opaque query handle\n", .{});
     try writer.print("struct {s}_query;\n\n", .{prefix});
+    try writer.print("// Opaque mutable container handle\n", .{});
+    try writer.print("struct {s}_mut;\n\n", .{prefix});
 
     // Serialization functions
     try writer.print("// Serialize to bytes (caller must free with {s}_free)\n", .{prefix});
@@ -55,6 +57,15 @@ pub fn generateHeader(comptime T: type, writer: anytype) !void {
 
     try writer.writeAll("// Read the array element count from serialized bytes\n");
     try writer.print("uint64_t {s}_array_count(const uint8_t* bytes, size_t len);\n\n", .{prefix});
+
+    try writer.writeAll("// Serialize into a caller-provided buffer (zero allocation)\n");
+    try writer.print(
+        "zdl_error_t {s}_serialize_into(const {s}* value, uint8_t* dest, size_t dest_len, zdl_target_t target, size_t* out_len);\n\n",
+        .{ prefix, simple_name },
+    );
+
+    try writer.writeAll("// Number of bytes serialize/serialize_into produce for this schema\n");
+    try writer.print("size_t {s}_serialized_size(zdl_target_t target);\n\n", .{prefix});
 
     // Query functions
     try writer.writeAll("// ========== Query API ==========\n\n");
@@ -102,6 +113,65 @@ pub fn generateHeader(comptime T: type, writer: anytype) !void {
 
     try writer.writeAll("// Reset the iterator to the beginning\n");
     try writer.print("void {s}_query_iter_reset(struct {s}_query* q);\n\n", .{ prefix, prefix });
+
+    // Mutable container functions
+    try writer.writeAll("// ========== Mutable Container API ==========\n");
+    try writer.writeAll("// In-memory CRUD over the array container format. Integrity moves to a\n");
+    try writer.writeAll("// per-record CRC; deletes are tombstones; records relocate ONLY at the\n");
+    try writer.writeAll("// fences (compact, reserve). Pointers returned by mut_get/mut_iter_next\n");
+    try writer.writeAll("// are invalidated by a fence; watch mut_generation to detect fences.\n\n");
+
+    try writer.writeAll("// Create an empty mutable container with the given slot capacity\n");
+    try writer.print("struct {s}_mut* {s}_mut_new(size_t capacity);\n\n", .{ prefix, prefix });
+
+    try writer.writeAll("// Load a serialized array container (validates header and container CRC)\n");
+    try writer.print("struct {s}_mut* {s}_mut_load(const uint8_t* bytes, size_t len, size_t extra_capacity);\n\n", .{ prefix, prefix });
+
+    try writer.writeAll("// Free a mutable container handle\n");
+    try writer.print("void {s}_mut_free(struct {s}_mut* m);\n\n", .{ prefix, prefix });
+
+    try writer.writeAll("// Append a record; fails with ZDL_ERR_CAPACITY_FULL instead of relocating\n");
+    try writer.print("zdl_error_t {s}_mut_append(struct {s}_mut* m, const {s}* value, size_t* out_slot);\n\n", .{ prefix, prefix, simple_name });
+
+    try writer.writeAll("// Zero-copy read (pointer valid until compact/reserve)\n");
+    try writer.print("const {s}* {s}_mut_get(struct {s}_mut* m, size_t slot);\n\n", .{ simple_name, prefix, prefix });
+
+    try writer.writeAll("// Integrity-checked point read: verifies the record CRC, copies into out\n");
+    try writer.print("zdl_error_t {s}_mut_get_verified(struct {s}_mut* m, size_t slot, {s}* out);\n\n", .{ prefix, prefix, simple_name });
+
+    try writer.writeAll("// In-place update; re-CRCs exactly one record\n");
+    try writer.print("zdl_error_t {s}_mut_update(struct {s}_mut* m, size_t slot, const {s}* value);\n\n", .{ prefix, prefix, simple_name });
+
+    try writer.writeAll("// Tombstone delete: no bytes move, existing pointers stay readable\n");
+    try writer.print("zdl_error_t {s}_mut_delete(struct {s}_mut* m, size_t slot);\n\n", .{ prefix, prefix });
+
+    try writer.writeAll("// Relocation fence: reclaim tombstones (order preserved), bump generation\n");
+    try writer.print("void {s}_mut_compact(struct {s}_mut* m);\n\n", .{ prefix, prefix });
+
+    try writer.writeAll("// Relocation fence: grow capacity; failure-atomic on OOM\n");
+    try writer.print("zdl_error_t {s}_mut_reserve(struct {s}_mut* m, size_t additional);\n\n", .{ prefix, prefix });
+
+    try writer.writeAll("// Slots in use, including tombstoned ones\n");
+    try writer.print("size_t {s}_mut_len(const struct {s}_mut* m);\n\n", .{ prefix, prefix });
+
+    try writer.writeAll("// Live (non-deleted) record count\n");
+    try writer.print("size_t {s}_mut_live(const struct {s}_mut* m);\n\n", .{ prefix, prefix });
+
+    try writer.writeAll("// Generation counter; changes exactly when a fence relocates storage\n");
+    try writer.print("uint64_t {s}_mut_generation(const struct {s}_mut* m);\n\n", .{ prefix, prefix });
+
+    try writer.print("// Emit a serialized array container of live records (caller must free with {s}_free)\n", .{prefix});
+    try writer.print("uint8_t* {s}_mut_flush(struct {s}_mut* m, size_t* out_len);\n\n", .{ prefix, prefix });
+
+    try writer.writeAll("// Start iterating live records in slot order\n");
+    try writer.print("zdl_error_t {s}_mut_iter_start(struct {s}_mut* m);\n\n", .{ prefix, prefix });
+
+    try writer.writeAll("// Next live record; NULL at end (zdl_last_error() == ZDL_OK) or after a\n");
+    try writer.writeAll("// fence (zdl_last_error() == ZDL_ERR_STALE_VIEW)\n");
+    try writer.print("const {s}* {s}_mut_iter_next(struct {s}_mut* m);\n\n", .{ simple_name, prefix, prefix });
+
+    try writer.writeAll("// Reset the mutable container iterator\n");
+    try writer.print("void {s}_mut_iter_reset(struct {s}_mut* m);\n\n", .{ prefix, prefix });
 
     // Introspection functions
     try writer.writeAll("// ========== Introspection API ==========\n\n");

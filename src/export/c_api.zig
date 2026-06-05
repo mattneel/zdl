@@ -91,6 +91,52 @@ pub fn serializeForType(comptime T: type, value: ?*const T, target: c_int, out_l
     return @constCast(bytes.ptr);
 }
 
+pub fn serializeIntoForType(
+    comptime T: type,
+    value: ?*const T,
+    dest: ?[*]u8,
+    dest_len: usize,
+    target: c_int,
+    out_len: ?*usize,
+) c_int {
+    c_error.clearError();
+
+    const ptr = value orelse {
+        c_error.setError(.null_param);
+        return @intFromEnum(Error.null_param);
+    };
+    const dest_ptr = dest orelse {
+        c_error.setError(.null_param);
+        return @intFromEnum(Error.null_param);
+    };
+    const out_len_ptr = out_len orelse {
+        c_error.setError(.null_param);
+        return @intFromEnum(Error.null_param);
+    };
+    const target_enum = toTarget(target) orelse {
+        c_error.setError(.unsupported_type);
+        return @intFromEnum(Error.unsupported_type);
+    };
+
+    const written = zdl.serialize.serializeInto(dest_ptr[0..dest_len], ptr.*, target_enum) catch |err| {
+        const code: Error = switch (err) {
+            error.BufferTooSmall => .buffer_too_small,
+            error.UnsupportedTarget => .unsupported_type,
+            error.DataTooLarge => .data_too_large,
+            else => .buffer_corrupt,
+        };
+        c_error.setError(code);
+        return @intFromEnum(code);
+    };
+    out_len_ptr.* = written.len;
+    return @intFromEnum(Error.ok);
+}
+
+pub fn serializedSizeForType(comptime T: type, target: c_int) usize {
+    const target_enum = toTarget(target) orelse return 0;
+    return zdl.serialize.serializedSize(T, target_enum);
+}
+
 pub fn deserializeForType(comptime T: type, bytes: ?[*]const u8, len: usize) ?*T {
     if (len == 0) return null;
     const ptr = bytes orelse return null;
@@ -432,6 +478,263 @@ pub fn QueryHandle(comptime T: type) type {
     };
 }
 
+/// Mutable container handle wrapper for C API. Wraps
+/// zdl.mutable.MutableContainer plus an optional iterator. Pointers handed
+/// out by get/iter_next point into container storage and are invalidated by
+/// the relocation fences (compact, reserve); after a fence, iter_next
+/// reports stale_view and get must be re-called.
+pub fn MutableHandle(comptime T: type) type {
+    const M = zdl.mutable.MutableContainer(T);
+
+    return struct {
+        const Self = @This();
+
+        container: M,
+        iterator: ?M.Iterator = null,
+
+        fn create(container: M) ?*Self {
+            const mem = std.c.malloc(@sizeOf(Self)) orelse {
+                c_error.setError(.out_of_memory);
+                return null;
+            };
+            const handle: *Self = @ptrCast(@alignCast(mem));
+            handle.* = .{ .container = container, .iterator = null };
+            return handle;
+        }
+
+        pub fn init(capacity: usize) ?*Self {
+            c_error.clearError();
+            const container = M.init(allocator, capacity) catch {
+                c_error.setError(.out_of_memory);
+                return null;
+            };
+            var c = container;
+            return create(c) orelse {
+                c.deinit();
+                return null;
+            };
+        }
+
+        pub fn load(bytes: ?[*]const u8, len: usize, extra_capacity: usize) ?*Self {
+            c_error.clearError();
+            if (len == 0) {
+                c_error.setError(.null_param);
+                return null;
+            }
+            const ptr = bytes orelse {
+                c_error.setError(.null_param);
+                return null;
+            };
+            var container = M.load(allocator, ptr[0..len], extra_capacity) catch |err| {
+                c_error.setError(c_error.fromLoadError(err));
+                return null;
+            };
+            return create(container) orelse {
+                container.deinit();
+                return null;
+            };
+        }
+
+        pub fn deinit(self: ?*Self) void {
+            const handle = self orelse return;
+            handle.container.deinit();
+            std.c.free(@ptrCast(handle));
+        }
+
+        pub fn append(self: ?*Self, value: ?*const T, out_slot: ?*usize) c_int {
+            c_error.clearError();
+            const handle = self orelse {
+                c_error.setError(.null_param);
+                return @intFromEnum(Error.null_param);
+            };
+            const value_ptr = value orelse {
+                c_error.setError(.null_param);
+                return @intFromEnum(Error.null_param);
+            };
+            const slot = handle.container.append(value_ptr.*) catch {
+                c_error.setError(.capacity_full);
+                return @intFromEnum(Error.capacity_full);
+            };
+            if (out_slot) |out| out.* = slot;
+            return @intFromEnum(Error.ok);
+        }
+
+        pub fn get(self: ?*Self, slot: usize) ?*const T {
+            c_error.clearError();
+            const handle = self orelse {
+                c_error.setError(.null_param);
+                return null;
+            };
+            return handle.container.get(slot) catch |err| {
+                c_error.setError(switch (err) {
+                    error.SlotOutOfRange => .slot_out_of_range,
+                    error.Deleted => .slot_deleted,
+                });
+                return null;
+            };
+        }
+
+        pub fn getVerified(self: ?*Self, slot: usize, out: ?*T) c_int {
+            c_error.clearError();
+            const handle = self orelse {
+                c_error.setError(.null_param);
+                return @intFromEnum(Error.null_param);
+            };
+            const out_ptr = out orelse {
+                c_error.setError(.null_param);
+                return @intFromEnum(Error.null_param);
+            };
+            const value = handle.container.getVerified(slot) catch |err| {
+                const code: Error = switch (err) {
+                    error.ChecksumMismatch => .checksum_mismatch,
+                    error.SlotOutOfRange => .slot_out_of_range,
+                    error.Deleted => .slot_deleted,
+                };
+                c_error.setError(code);
+                return @intFromEnum(code);
+            };
+            out_ptr.* = value;
+            return @intFromEnum(Error.ok);
+        }
+
+        pub fn update(self: ?*Self, slot: usize, value: ?*const T) c_int {
+            c_error.clearError();
+            const handle = self orelse {
+                c_error.setError(.null_param);
+                return @intFromEnum(Error.null_param);
+            };
+            const value_ptr = value orelse {
+                c_error.setError(.null_param);
+                return @intFromEnum(Error.null_param);
+            };
+            handle.container.update(slot, value_ptr.*) catch |err| {
+                const code: Error = switch (err) {
+                    error.SlotOutOfRange => .slot_out_of_range,
+                    error.Deleted => .slot_deleted,
+                };
+                c_error.setError(code);
+                return @intFromEnum(code);
+            };
+            return @intFromEnum(Error.ok);
+        }
+
+        pub fn del(self: ?*Self, slot: usize) c_int {
+            c_error.clearError();
+            const handle = self orelse {
+                c_error.setError(.null_param);
+                return @intFromEnum(Error.null_param);
+            };
+            handle.container.delete(slot) catch |err| {
+                const code: Error = switch (err) {
+                    error.SlotOutOfRange => .slot_out_of_range,
+                    error.AlreadyDeleted => .slot_deleted,
+                };
+                c_error.setError(code);
+                return @intFromEnum(code);
+            };
+            return @intFromEnum(Error.ok);
+        }
+
+        pub fn compact(self: ?*Self) void {
+            c_error.clearError();
+            const handle = self orelse {
+                c_error.setError(.null_param);
+                return;
+            };
+            handle.container.compact();
+        }
+
+        pub fn reserve(self: ?*Self, additional: usize) c_int {
+            c_error.clearError();
+            const handle = self orelse {
+                c_error.setError(.null_param);
+                return @intFromEnum(Error.null_param);
+            };
+            handle.container.reserve(additional) catch {
+                c_error.setError(.out_of_memory);
+                return @intFromEnum(Error.out_of_memory);
+            };
+            return @intFromEnum(Error.ok);
+        }
+
+        pub fn lenOf(self: ?*const Self) usize {
+            const handle = self orelse return 0;
+            return handle.container.len;
+        }
+
+        pub fn liveOf(self: ?*const Self) usize {
+            const handle = self orelse return 0;
+            return handle.container.live;
+        }
+
+        pub fn generationOf(self: ?*const Self) u64 {
+            const handle = self orelse return 0;
+            return handle.container.generation;
+        }
+
+        pub fn flush(self: ?*Self, out_len: ?*usize) ?[*]u8 {
+            c_error.clearError();
+            const handle = self orelse {
+                c_error.setError(.null_param);
+                return null;
+            };
+            const out_len_ptr = out_len orelse {
+                c_error.setError(.null_param);
+                return null;
+            };
+            const bytes = handle.container.flush(allocator) catch |err| {
+                const code: Error = switch (err) {
+                    error.DataTooLarge => .data_too_large,
+                    error.OutOfMemory => .out_of_memory,
+                };
+                c_error.setError(code);
+                return null;
+            };
+            out_len_ptr.* = bytes.len;
+            return bytes.ptr;
+        }
+
+        pub fn iterStart(self: ?*Self) c_int {
+            c_error.clearError();
+            const handle = self orelse {
+                c_error.setError(.null_param);
+                return @intFromEnum(Error.null_param);
+            };
+            handle.iterator = handle.container.iter();
+            return @intFromEnum(Error.ok);
+        }
+
+        /// Returns NULL at end of iteration OR on stale view; check
+        /// zdl_last_error to distinguish (ok = end, stale_view = fence).
+        pub fn iterNext(self: ?*Self) ?*const T {
+            c_error.clearError();
+            const handle = self orelse {
+                c_error.setError(.null_param);
+                return null;
+            };
+            var iter = &(handle.iterator orelse {
+                c_error.setError(.iterator_not_started);
+                return null;
+            });
+            const item = iter.next() catch {
+                c_error.setError(.stale_view);
+                return null;
+            };
+            return item;
+        }
+
+        pub fn iterReset(self: ?*Self) void {
+            c_error.clearError();
+            const handle = self orelse {
+                c_error.setError(.null_param);
+                return;
+            };
+            handle.iterator = null;
+        }
+
+    };
+}
+
 /// Generate field info at comptime for a schema type.
 pub fn generateFieldInfo(comptime T: type) []const FieldInfo {
     const fields = std.meta.fields(T);
@@ -524,6 +827,11 @@ fn fieldTypeFromZig(comptime T: type) FieldType {
 /// - `{prefix}_field_info` - Get field info by index
 /// - `{prefix}_field_by_name` - Get field info by name
 /// - `{prefix}_struct_size` - Get struct size
+/// - `{prefix}_serialize_into` - Zero-alloc serialize into a caller buffer
+/// - `{prefix}_serialized_size` - Required buffer size for serialize_into
+/// - `{prefix}_mut_*` - Mutable container CRUD (new/load/free/append/get/
+///   get_verified/update/delete/compact/reserve/len/live/generation/flush/
+///   iter_start/iter_next/iter_reset)
 pub fn exportCApi(comptime registry: []const SchemaDescriptor) void {
     // Export global error functions
     @export(&c_error.zdl_last_error, .{
@@ -541,6 +849,7 @@ pub fn exportCApi(comptime registry: []const SchemaDescriptor) void {
         const T = entry.Type;
         const prefix = entry.c_prefix;
         const QH = QueryHandle(T);
+        const MH = MutableHandle(T);
 
         // Serialize
         const SerializeWrapper = struct {
@@ -899,14 +1208,283 @@ pub fn exportCApi(comptime registry: []const SchemaDescriptor) void {
                 .visibility = .default,
             },
         );
+
+        // Zero-alloc serialize into caller buffer
+        const SerializeIntoWrapper = struct {
+            fn call(value: ?*const T, dest: ?[*]u8, dest_len: usize, target: c_int, out_len: ?*usize) callconv(.c) c_int {
+                return serializeIntoForType(T, value, dest, dest_len, target, out_len);
+            }
+        };
+        @export(
+            &SerializeIntoWrapper.call,
+            .{
+                .name = std.fmt.comptimePrint("{s}_serialize_into", .{prefix}),
+                .linkage = .strong,
+                .visibility = .default,
+            },
+        );
+
+        // Serialized size for buffer sizing
+        const SerializedSizeWrapper = struct {
+            fn call(target: c_int) callconv(.c) usize {
+                return serializedSizeForType(T, target);
+            }
+        };
+        @export(
+            &SerializedSizeWrapper.call,
+            .{
+                .name = std.fmt.comptimePrint("{s}_serialized_size", .{prefix}),
+                .linkage = .strong,
+                .visibility = .default,
+            },
+        );
+
+        // Mutable container API
+        const MutNewWrapper = struct {
+            fn call(capacity: usize) callconv(.c) ?*MH {
+                return MH.init(capacity);
+            }
+        };
+        @export(
+            &MutNewWrapper.call,
+            .{
+                .name = std.fmt.comptimePrint("{s}_mut_new", .{prefix}),
+                .linkage = .strong,
+                .visibility = .default,
+            },
+        );
+
+        const MutLoadWrapper = struct {
+            fn call(bytes: ?[*]const u8, len: usize, extra_capacity: usize) callconv(.c) ?*MH {
+                return MH.load(bytes, len, extra_capacity);
+            }
+        };
+        @export(
+            &MutLoadWrapper.call,
+            .{
+                .name = std.fmt.comptimePrint("{s}_mut_load", .{prefix}),
+                .linkage = .strong,
+                .visibility = .default,
+            },
+        );
+
+        const MutFreeWrapper = struct {
+            fn call(handle: ?*MH) callconv(.c) void {
+                MH.deinit(handle);
+            }
+        };
+        @export(
+            &MutFreeWrapper.call,
+            .{
+                .name = std.fmt.comptimePrint("{s}_mut_free", .{prefix}),
+                .linkage = .strong,
+                .visibility = .default,
+            },
+        );
+
+        const MutAppendWrapper = struct {
+            fn call(handle: ?*MH, value: ?*const T, out_slot: ?*usize) callconv(.c) c_int {
+                return MH.append(handle, value, out_slot);
+            }
+        };
+        @export(
+            &MutAppendWrapper.call,
+            .{
+                .name = std.fmt.comptimePrint("{s}_mut_append", .{prefix}),
+                .linkage = .strong,
+                .visibility = .default,
+            },
+        );
+
+        const MutGetWrapper = struct {
+            fn call(handle: ?*MH, slot: usize) callconv(.c) ?*const T {
+                return MH.get(handle, slot);
+            }
+        };
+        @export(
+            &MutGetWrapper.call,
+            .{
+                .name = std.fmt.comptimePrint("{s}_mut_get", .{prefix}),
+                .linkage = .strong,
+                .visibility = .default,
+            },
+        );
+
+        const MutGetVerifiedWrapper = struct {
+            fn call(handle: ?*MH, slot: usize, out: ?*T) callconv(.c) c_int {
+                return MH.getVerified(handle, slot, out);
+            }
+        };
+        @export(
+            &MutGetVerifiedWrapper.call,
+            .{
+                .name = std.fmt.comptimePrint("{s}_mut_get_verified", .{prefix}),
+                .linkage = .strong,
+                .visibility = .default,
+            },
+        );
+
+        const MutUpdateWrapper = struct {
+            fn call(handle: ?*MH, slot: usize, value: ?*const T) callconv(.c) c_int {
+                return MH.update(handle, slot, value);
+            }
+        };
+        @export(
+            &MutUpdateWrapper.call,
+            .{
+                .name = std.fmt.comptimePrint("{s}_mut_update", .{prefix}),
+                .linkage = .strong,
+                .visibility = .default,
+            },
+        );
+
+        const MutDeleteWrapper = struct {
+            fn call(handle: ?*MH, slot: usize) callconv(.c) c_int {
+                return MH.del(handle, slot);
+            }
+        };
+        @export(
+            &MutDeleteWrapper.call,
+            .{
+                .name = std.fmt.comptimePrint("{s}_mut_delete", .{prefix}),
+                .linkage = .strong,
+                .visibility = .default,
+            },
+        );
+
+        const MutCompactWrapper = struct {
+            fn call(handle: ?*MH) callconv(.c) void {
+                MH.compact(handle);
+            }
+        };
+        @export(
+            &MutCompactWrapper.call,
+            .{
+                .name = std.fmt.comptimePrint("{s}_mut_compact", .{prefix}),
+                .linkage = .strong,
+                .visibility = .default,
+            },
+        );
+
+        const MutReserveWrapper = struct {
+            fn call(handle: ?*MH, additional: usize) callconv(.c) c_int {
+                return MH.reserve(handle, additional);
+            }
+        };
+        @export(
+            &MutReserveWrapper.call,
+            .{
+                .name = std.fmt.comptimePrint("{s}_mut_reserve", .{prefix}),
+                .linkage = .strong,
+                .visibility = .default,
+            },
+        );
+
+        const MutLenWrapper = struct {
+            fn call(handle: ?*const MH) callconv(.c) usize {
+                return MH.lenOf(handle);
+            }
+        };
+        @export(
+            &MutLenWrapper.call,
+            .{
+                .name = std.fmt.comptimePrint("{s}_mut_len", .{prefix}),
+                .linkage = .strong,
+                .visibility = .default,
+            },
+        );
+
+        const MutLiveWrapper = struct {
+            fn call(handle: ?*const MH) callconv(.c) usize {
+                return MH.liveOf(handle);
+            }
+        };
+        @export(
+            &MutLiveWrapper.call,
+            .{
+                .name = std.fmt.comptimePrint("{s}_mut_live", .{prefix}),
+                .linkage = .strong,
+                .visibility = .default,
+            },
+        );
+
+        const MutGenerationWrapper = struct {
+            fn call(handle: ?*const MH) callconv(.c) u64 {
+                return MH.generationOf(handle);
+            }
+        };
+        @export(
+            &MutGenerationWrapper.call,
+            .{
+                .name = std.fmt.comptimePrint("{s}_mut_generation", .{prefix}),
+                .linkage = .strong,
+                .visibility = .default,
+            },
+        );
+
+        const MutFlushWrapper = struct {
+            fn call(handle: ?*MH, out_len: ?*usize) callconv(.c) ?[*]u8 {
+                return MH.flush(handle, out_len);
+            }
+        };
+        @export(
+            &MutFlushWrapper.call,
+            .{
+                .name = std.fmt.comptimePrint("{s}_mut_flush", .{prefix}),
+                .linkage = .strong,
+                .visibility = .default,
+            },
+        );
+
+        const MutIterStartWrapper = struct {
+            fn call(handle: ?*MH) callconv(.c) c_int {
+                return MH.iterStart(handle);
+            }
+        };
+        @export(
+            &MutIterStartWrapper.call,
+            .{
+                .name = std.fmt.comptimePrint("{s}_mut_iter_start", .{prefix}),
+                .linkage = .strong,
+                .visibility = .default,
+            },
+        );
+
+        const MutIterNextWrapper = struct {
+            fn call(handle: ?*MH) callconv(.c) ?*const T {
+                return MH.iterNext(handle);
+            }
+        };
+        @export(
+            &MutIterNextWrapper.call,
+            .{
+                .name = std.fmt.comptimePrint("{s}_mut_iter_next", .{prefix}),
+                .linkage = .strong,
+                .visibility = .default,
+            },
+        );
+
+        const MutIterResetWrapper = struct {
+            fn call(handle: ?*MH) callconv(.c) void {
+                MH.iterReset(handle);
+            }
+        };
+        @export(
+            &MutIterResetWrapper.call,
+            .{
+                .name = std.fmt.comptimePrint("{s}_mut_iter_reset", .{prefix}),
+                .linkage = .strong,
+                .visibility = .default,
+            },
+        );
     }
 }
 
 /// Generate the list of exported symbol names for a registry.
 /// Use this when configuring export_symbol_names on your library module in build.zig.
 pub fn getExportNames(comptime registry: []const SchemaDescriptor) []const []const u8 {
-    // 25 functions per schema + 2 global error functions
-    const funcs_per_schema = 25;
+    // 42 functions per schema + 2 global error functions
+    const funcs_per_schema = 42;
     comptime var names: [registry.len * funcs_per_schema + 2][]const u8 = undefined;
 
     // Global error functions
@@ -938,9 +1516,25 @@ pub fn getExportNames(comptime registry: []const SchemaDescriptor) []const []con
         names[base + 20] = std.fmt.comptimePrint("{s}_field_info", .{entry.c_prefix});
         names[base + 21] = std.fmt.comptimePrint("{s}_field_by_name", .{entry.c_prefix});
         names[base + 22] = std.fmt.comptimePrint("{s}_struct_size", .{entry.c_prefix});
-        // Reserve slots for future use
-        names[base + 23] = std.fmt.comptimePrint("{s}_reserved1", .{entry.c_prefix});
-        names[base + 24] = std.fmt.comptimePrint("{s}_reserved2", .{entry.c_prefix});
+        names[base + 23] = std.fmt.comptimePrint("{s}_serialize_into", .{entry.c_prefix});
+        names[base + 24] = std.fmt.comptimePrint("{s}_serialized_size", .{entry.c_prefix});
+        names[base + 25] = std.fmt.comptimePrint("{s}_mut_new", .{entry.c_prefix});
+        names[base + 26] = std.fmt.comptimePrint("{s}_mut_load", .{entry.c_prefix});
+        names[base + 27] = std.fmt.comptimePrint("{s}_mut_free", .{entry.c_prefix});
+        names[base + 28] = std.fmt.comptimePrint("{s}_mut_append", .{entry.c_prefix});
+        names[base + 29] = std.fmt.comptimePrint("{s}_mut_get", .{entry.c_prefix});
+        names[base + 30] = std.fmt.comptimePrint("{s}_mut_get_verified", .{entry.c_prefix});
+        names[base + 31] = std.fmt.comptimePrint("{s}_mut_update", .{entry.c_prefix});
+        names[base + 32] = std.fmt.comptimePrint("{s}_mut_delete", .{entry.c_prefix});
+        names[base + 33] = std.fmt.comptimePrint("{s}_mut_compact", .{entry.c_prefix});
+        names[base + 34] = std.fmt.comptimePrint("{s}_mut_reserve", .{entry.c_prefix});
+        names[base + 35] = std.fmt.comptimePrint("{s}_mut_len", .{entry.c_prefix});
+        names[base + 36] = std.fmt.comptimePrint("{s}_mut_live", .{entry.c_prefix});
+        names[base + 37] = std.fmt.comptimePrint("{s}_mut_generation", .{entry.c_prefix});
+        names[base + 38] = std.fmt.comptimePrint("{s}_mut_flush", .{entry.c_prefix});
+        names[base + 39] = std.fmt.comptimePrint("{s}_mut_iter_start", .{entry.c_prefix});
+        names[base + 40] = std.fmt.comptimePrint("{s}_mut_iter_next", .{entry.c_prefix});
+        names[base + 41] = std.fmt.comptimePrint("{s}_mut_iter_reset", .{entry.c_prefix});
     }
     const final = names;
     return &final;

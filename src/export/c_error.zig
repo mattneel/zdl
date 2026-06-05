@@ -13,6 +13,14 @@ pub const Error = enum(c_int) {
     too_many_filters = 8,
     iterator_not_started = 9,
     unsupported_type = 10,
+    capacity_full = 11,
+    stale_view = 12,
+    slot_out_of_range = 13,
+    slot_deleted = 14,
+    checksum_mismatch = 15,
+    version_mismatch = 16,
+    buffer_too_small = 17,
+    data_too_large = 18,
 };
 
 /// Thread-local storage for the last error that occurred.
@@ -47,6 +55,26 @@ pub fn errorMessage(err: Error) [*:0]const u8 {
         .too_many_filters => "Too many filters applied",
         .iterator_not_started => "Iterator not started",
         .unsupported_type => "Unsupported field type for filtering",
+        .capacity_full => "Container capacity is full (call reserve)",
+        .stale_view => "View invalidated by a relocation fence (compact/reserve)",
+        .slot_out_of_range => "Slot index out of range",
+        .slot_deleted => "Record at slot is deleted",
+        .checksum_mismatch => "Record or container checksum mismatch",
+        .version_mismatch => "Container schema version does not match",
+        .buffer_too_small => "Destination buffer too small",
+        .data_too_large => "Data exceeds maximum container size",
+    };
+}
+
+/// Convert a MutableContainer load error to a C API error code.
+pub fn fromLoadError(err: anytype) Error {
+    return switch (err) {
+        error.UnsupportedTarget => .unsupported_type,
+        error.ChecksumMismatch => .checksum_mismatch,
+        error.VersionMismatch => .version_mismatch,
+        error.DataTooLarge => .data_too_large,
+        error.OutOfMemory => .out_of_memory,
+        else => .buffer_corrupt, // NotAnArrayContainer, SizeMismatch, format errors
     };
 }
 
