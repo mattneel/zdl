@@ -130,6 +130,11 @@ zig build
 zdl_error_t zdl_last_error(void);
 const char* zdl_error_message(zdl_error_t err);
 
+// Allocation (lets wasm/C hosts place input buffers in zdl's memory).
+// Only pointers returned by zdl may be freed, exactly once.
+void* zdl_alloc(size_t size);
+void  zdl_free(void* ptr);
+
 // Error codes
 typedef enum {
     ZDL_OK = 0,
