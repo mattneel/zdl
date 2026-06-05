@@ -216,6 +216,26 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(zdl_shared_lib);
 
+    // Freestanding WebAssembly module exposing the same C API surface.
+    const wasm_target = b.resolveTargetQuery(.{
+        .cpu_arch = .wasm64,
+        .os_tag = .freestanding,
+    });
+    const wasm_module = b.createModule(.{
+        .root_source_file = b.path("src/lib_root.zig"),
+        .target = wasm_target,
+        .optimize = optimize,
+    });
+    wasm_module.export_symbol_names = generateExportNames();
+    const wasm_exe = b.addExecutable(.{
+        .name = "zdl",
+        .root_module = wasm_module,
+    });
+    wasm_exe.entry = .disabled;
+    const wasm_install = b.addInstallFile(wasm_exe.getEmittedBin(), "wasm/zdl.wasm");
+    const wasm_step = b.step("wasm", "Build freestanding WebAssembly module (zig-out/wasm/zdl.wasm)");
+    wasm_step.dependOn(&wasm_install.step);
+
     const gen_headers_module = b.createModule(.{
         .root_source_file = b.path("tools/generate_headers.zig"),
         .target = target,
@@ -235,6 +255,22 @@ pub fn build(b: *std.Build) void {
     const gen_headers_step = b.step("gen-headers", "Generate C headers");
     gen_headers_step.dependOn(&run_gen_headers.step);
     b.getInstallStep().dependOn(&run_gen_headers.step);
+
+    // JavaScript binding generator (pairs with the wasm step)
+    const gen_js_module = b.createModule(.{
+        .root_source_file = b.path("tools/gen_js.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "zdl", .module = zdl_module }},
+    });
+    const gen_js = b.addExecutable(.{
+        .name = "gen-js",
+        .root_module = gen_js_module,
+    });
+    const run_gen_js = b.addRunArtifact(gen_js);
+    run_gen_js.addArg("zig-out/js");
+    const gen_js_step = b.step("gen-js", "Generate JavaScript (ES module) bindings");
+    gen_js_step.dependOn(&run_gen_js.step);
 
     // Python binding generator
     const gen_python_module = b.createModule(.{

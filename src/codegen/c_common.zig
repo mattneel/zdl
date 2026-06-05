@@ -91,6 +91,14 @@ pub fn generateCommonHeader(writer: anytype) !void {
         \\// Returns a human-readable error message for the given error code
         \\const char* zdl_error_message(zdl_error_t err);
         \\
+        \\// Allocate size bytes from the zdl allocator (free with zdl_free).
+        \\// Only pointers returned by zdl may be passed to zdl_free/{schema}_free,
+        \\// exactly once.
+        \\void* zdl_alloc(size_t size);
+        \\
+        \\// Free memory allocated by the zdl C API
+        \\void zdl_free(void* ptr);
+        \\
         \\#ifdef __cplusplus
         \\}
         \\#endif

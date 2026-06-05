@@ -1,10 +1,119 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const zdl = @import("../root.zig");
 const c_error = @import("c_error.zig");
 
 const Target = zdl.Target;
 const query_mod = zdl.query;
-const allocator = std.heap.c_allocator;
+
+// ---------------------------------------------------------------------------
+// Allocation across the C ABI boundary.
+//
+// Hosted targets use libc malloc/free, so `{prefix}_free(ptr)` is plain
+// free() and callers can mix zdl allocations with their own malloc
+// discipline. Freestanding targets (wasm32-freestanding in particular) have
+// no libc: allocations are prefixed with a hidden size header so they can
+// still be freed by bare pointer, preserving the same C contract.
+// ---------------------------------------------------------------------------
+
+const use_portable_alloc = builtin.os.tag == .freestanding;
+
+/// Big enough for the maximum alignment of any exportable schema type
+/// (Zig's max integer alignment on wasm32/x86_64 is 16). Layout: total
+/// allocation length at [0..8], magic canary at [8..16].
+const portable_header = 16;
+
+/// Canary stamped into every headered allocation. freeAlloc asserts it in
+/// safety-checked builds to catch foreign pointers and double-frees before
+/// a bogus length reaches the backing allocator. NOTE: in release builds a
+/// foreign pointer passed to {prefix}_free/zdl_free silently corrupts the
+/// allocator (libc free aborts; WasmAllocator cannot detect misuse) — only
+/// pass pointers that zdl returned, exactly once.
+const portable_magic: u64 = 0x7A_64_6C_61_6C_6C_6F_63; // "zdlalloc"
+
+const portable_backing: std.mem.Allocator = blk: {
+    if (!builtin.target.cpu.arch.isWasm()) {
+        @compileError("zdl C API on freestanding targets requires wasm32/wasm64");
+    }
+    break :blk std.heap.wasm_allocator;
+};
+
+fn portableAllocFn(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+    _ = ctx;
+    std.debug.assert(alignment.toByteUnits() <= portable_header);
+    const total = std.math.add(usize, portable_header, len) catch return null;
+    const base = portable_backing.rawAlloc(
+        total,
+        comptime std.mem.Alignment.fromByteUnits(portable_header),
+        ret_addr,
+    ) orelse return null;
+    std.mem.writeInt(usize, base[0..@sizeOf(usize)], total, .little);
+    std.mem.writeInt(u64, base[8..16], portable_magic, .little);
+    return base + portable_header;
+}
+
+fn portableResizeFn(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+    _ = ctx;
+    _ = memory;
+    _ = alignment;
+    _ = new_len;
+    _ = ret_addr;
+    return false; // headered allocations never resize in place
+}
+
+fn portableRemapFn(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+    _ = ctx;
+    _ = memory;
+    _ = alignment;
+    _ = new_len;
+    _ = ret_addr;
+    return null;
+}
+
+fn portableFreeFn(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+    _ = ctx;
+    _ = alignment;
+    const base = memory.ptr - portable_header;
+    // Depends on a std invariant: Allocator.free (and the realloc fallback,
+    // since resize/remap always decline here) is always called with the exact
+    // length the allocation was created with, so the stored header matches.
+    const total = portable_header + memory.len;
+    std.debug.assert(std.mem.readInt(usize, base[0..@sizeOf(usize)], .little) == total);
+    std.debug.assert(std.mem.readInt(u64, base[8..16], .little) == portable_magic);
+    portable_backing.rawFree(
+        base[0..total],
+        comptime std.mem.Alignment.fromByteUnits(portable_header),
+        ret_addr,
+    );
+}
+
+const portable_vtable = std.mem.Allocator.VTable{
+    .alloc = portableAllocFn,
+    .resize = portableResizeFn,
+    .remap = portableRemapFn,
+    .free = portableFreeFn,
+};
+
+const portable_allocator = std.mem.Allocator{
+    .ptr = undefined,
+    .vtable = &portable_vtable,
+};
+
+const allocator: std.mem.Allocator = if (use_portable_alloc) portable_allocator else std.heap.c_allocator;
+
+/// malloc-style allocation usable from C/wasm hosts; freed with `freeAlloc`
+/// (i.e. `{prefix}_free` / `zdl_free`).
+pub fn rawAlloc(size: usize) ?*anyopaque {
+    if (comptime use_portable_alloc) {
+        const mem = allocator.rawAlloc(
+            size,
+            comptime std.mem.Alignment.fromByteUnits(portable_header),
+            @returnAddress(),
+        ) orelse return null;
+        return @ptrCast(mem);
+    }
+    return std.c.malloc(size);
+}
 
 pub const Error = c_error.Error;
 pub const setError = c_error.setError;
@@ -79,11 +188,27 @@ fn toOperator(cmp: c_int) ?query_mod.Operator {
 }
 
 pub fn serializeForType(comptime T: type, value: ?*const T, target: c_int, out_len: ?*usize) ?[*]u8 {
-    const ptr = value orelse return null;
-    const out_len_ptr = out_len orelse return null;
-    const target_enum = toTarget(target) orelse return null;
+    c_error.clearError();
+    const ptr = value orelse {
+        c_error.setError(.null_param);
+        return null;
+    };
+    const out_len_ptr = out_len orelse {
+        c_error.setError(.null_param);
+        return null;
+    };
+    const target_enum = toTarget(target) orelse {
+        c_error.setError(.unsupported_type);
+        return null;
+    };
 
-    const bytes = zdl.serialize.serialize(ptr.*, target_enum, allocator) catch {
+    const bytes = zdl.serialize.serialize(ptr.*, target_enum, allocator) catch |err| {
+        c_error.setError(switch (err) {
+            error.UnsupportedTarget => .unsupported_type,
+            error.DataTooLarge => .data_too_large,
+            error.OutOfMemory => .out_of_memory,
+            else => .buffer_corrupt,
+        });
         return null;
     };
 
@@ -138,30 +263,63 @@ pub fn serializedSizeForType(comptime T: type, target: c_int) usize {
 }
 
 pub fn deserializeForType(comptime T: type, bytes: ?[*]const u8, len: usize) ?*T {
-    if (len == 0) return null;
-    const ptr = bytes orelse return null;
+    c_error.clearError();
+    if (len == 0) {
+        c_error.setError(.null_param);
+        return null;
+    }
+    const ptr = bytes orelse {
+        c_error.setError(.null_param);
+        return null;
+    };
     const slice = ptr[0..len];
 
-    const value = zdl.deserialize.deserialize(T, slice, allocator) catch {
+    const value = zdl.deserialize.deserialize(T, slice, allocator) catch |err| {
+        c_error.setError(switch (err) {
+            error.ChecksumMismatch => .checksum_mismatch,
+            error.UnsupportedTarget => .unsupported_type,
+            error.DataTooLarge => .data_too_large,
+            else => .buffer_corrupt, // size/truncation/format/magic errors
+        });
         return null;
     };
 
-    const mem = std.c.malloc(@sizeOf(T)) orelse return null;
+    comptime std.debug.assert(@alignOf(T) <= portable_header);
+    const mem = rawAlloc(@sizeOf(T)) orelse {
+        c_error.setError(.out_of_memory);
+        return null;
+    };
     const typed: *T = @ptrCast(@alignCast(mem));
     typed.* = value;
     return typed;
 }
 
 pub fn serializeArrayForType(comptime T: type, items: ?[*]const T, count: usize, target: c_int, out_len: ?*usize) ?[*]u8 {
-    const out_len_ptr = out_len orelse return null;
-    const target_enum = toTarget(target) orelse return null;
+    c_error.clearError();
+    const out_len_ptr = out_len orelse {
+        c_error.setError(.null_param);
+        return null;
+    };
+    const target_enum = toTarget(target) orelse {
+        c_error.setError(.unsupported_type);
+        return null;
+    };
 
     const slice: []const T = if (count == 0) &[_]T{} else blk: {
-        const ptr = items orelse return null;
+        const ptr = items orelse {
+            c_error.setError(.null_param);
+            return null;
+        };
         break :blk ptr[0..count];
     };
 
-    const bytes = zdl.format.serializeArray(T, slice, target_enum, allocator) catch {
+    const bytes = zdl.format.serializeArray(T, slice, target_enum, allocator) catch |err| {
+        c_error.setError(switch (err) {
+            error.UnsupportedTarget => .unsupported_type,
+            error.DataTooLarge => .data_too_large,
+            error.OutOfMemory => .out_of_memory,
+            else => .buffer_corrupt,
+        });
         return null;
     };
 
@@ -170,16 +328,46 @@ pub fn serializeArrayForType(comptime T: type, items: ?[*]const T, count: usize,
 }
 
 pub fn arrayCountFromBytes(bytes: ?[*]const u8, len: usize) u64 {
-    if (len == 0) return 0;
-    const ptr = bytes orelse return 0;
+    c_error.clearError();
+    if (len == 0) {
+        c_error.setError(.null_param);
+        return 0;
+    }
+    const ptr = bytes orelse {
+        c_error.setError(.null_param);
+        return 0;
+    };
     const slice = ptr[0..len];
-    return zdl.format.arrayCount(slice) catch 0;
+    return zdl.format.arrayCount(slice) catch {
+        c_error.setError(.buffer_corrupt);
+        return 0;
+    };
 }
 
 pub fn freeAlloc(ptr: ?*anyopaque) void {
-    if (ptr) |p| {
+    const p = ptr orelse return;
+    if (comptime use_portable_alloc) {
+        const user: [*]u8 = @ptrCast(p);
+        const base = user - portable_header;
+        const total = std.mem.readInt(usize, base[0..@sizeOf(usize)], .little);
+        // catches foreign pointers / double-frees in safety-checked builds
+        std.debug.assert(std.mem.readInt(u64, base[8..16], .little) == portable_magic);
+        portable_backing.rawFree(
+            base[0..total],
+            comptime std.mem.Alignment.fromByteUnits(portable_header),
+            @returnAddress(),
+        );
+    } else {
         std.c.free(p);
     }
+}
+
+fn zdlAllocExport(size: usize) callconv(.c) ?[*]u8 {
+    return @ptrCast(rawAlloc(size));
+}
+
+fn zdlFreeExport(ptr: ?*anyopaque) callconv(.c) void {
+    freeAlloc(ptr);
 }
 
 /// Query handle wrapper for C API. Manages QueryBuilder state and iterator.
@@ -205,7 +393,8 @@ pub fn QueryHandle(comptime T: type) type {
             };
             const slice = ptr[0..len];
 
-            const mem = std.c.malloc(@sizeOf(Self)) orelse {
+            comptime std.debug.assert(@alignOf(Self) <= portable_header);
+            const mem = rawAlloc(@sizeOf(Self)) orelse {
                 c_error.setError(.out_of_memory);
                 return null;
             };
@@ -220,7 +409,7 @@ pub fn QueryHandle(comptime T: type) type {
         pub fn deinit(self: ?*Self) void {
             const handle = self orelse return;
             handle.builder.deinit();
-            std.c.free(@ptrCast(handle));
+            freeAlloc(@ptrCast(handle));
         }
 
         pub fn filterU64(self: ?*Self, field: ?[*:0]const u8, cmp: c_int, value: u64) c_int {
@@ -493,7 +682,8 @@ pub fn MutableHandle(comptime T: type) type {
         iterator: ?M.Iterator = null,
 
         fn create(container: M) ?*Self {
-            const mem = std.c.malloc(@sizeOf(Self)) orelse {
+            comptime std.debug.assert(@alignOf(Self) <= portable_header);
+            const mem = rawAlloc(@sizeOf(Self)) orelse {
                 c_error.setError(.out_of_memory);
                 return null;
             };
@@ -538,7 +728,7 @@ pub fn MutableHandle(comptime T: type) type {
         pub fn deinit(self: ?*Self) void {
             const handle = self orelse return;
             handle.container.deinit();
-            std.c.free(@ptrCast(handle));
+            freeAlloc(@ptrCast(handle));
         }
 
         pub fn append(self: ?*Self, value: ?*const T, out_slot: ?*usize) c_int {
@@ -841,6 +1031,18 @@ pub fn exportCApi(comptime registry: []const SchemaDescriptor) void {
     });
     @export(&c_error.zdl_error_message, .{
         .name = "zdl_error_message",
+        .linkage = .strong,
+        .visibility = .default,
+    });
+    // Host-side allocation (lets wasm/JS hosts place input buffers inside
+    // linear memory; on hosted targets these are malloc/free wrappers)
+    @export(&zdlAllocExport, .{
+        .name = "zdl_alloc",
+        .linkage = .strong,
+        .visibility = .default,
+    });
+    @export(&zdlFreeExport, .{
+        .name = "zdl_free",
         .linkage = .strong,
         .visibility = .default,
     });
@@ -1483,16 +1685,18 @@ pub fn exportCApi(comptime registry: []const SchemaDescriptor) void {
 /// Generate the list of exported symbol names for a registry.
 /// Use this when configuring export_symbol_names on your library module in build.zig.
 pub fn getExportNames(comptime registry: []const SchemaDescriptor) []const []const u8 {
-    // 42 functions per schema + 2 global error functions
+    // 42 functions per schema + 4 global functions
     const funcs_per_schema = 42;
-    comptime var names: [registry.len * funcs_per_schema + 2][]const u8 = undefined;
+    comptime var names: [registry.len * funcs_per_schema + 4][]const u8 = undefined;
 
-    // Global error functions
+    // Global functions
     names[0] = "zdl_last_error";
     names[1] = "zdl_error_message";
+    names[2] = "zdl_alloc";
+    names[3] = "zdl_free";
 
     inline for (registry, 0..) |entry, i| {
-        const base = i * funcs_per_schema + 2;
+        const base = i * funcs_per_schema + 4;
         names[base + 0] = std.fmt.comptimePrint("{s}_serialize", .{entry.c_prefix});
         names[base + 1] = std.fmt.comptimePrint("{s}_deserialize", .{entry.c_prefix});
         names[base + 2] = std.fmt.comptimePrint("{s}_free", .{entry.c_prefix});

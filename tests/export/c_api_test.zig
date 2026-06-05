@@ -459,7 +459,45 @@ test "export names cover 42 functions per schema" {
         .{ .Type = Sample, .c_prefix = "sample" },
     };
     const names = comptime c_api.getExportNames(&registry);
-    try testing.expectEqual(@as(usize, 42 + 2), names.len);
+    try testing.expectEqual(@as(usize, 42 + 4), names.len);
+    try testing.expectEqualStrings("zdl_alloc", names[2]);
+    try testing.expectEqualStrings("zdl_free", names[3]);
     try testing.expectEqualStrings("sample_mut_iter_reset", names[names.len - 1]);
-    try testing.expectEqualStrings("sample_serialize_into", names[2 + 23]);
+    try testing.expectEqualStrings("sample_serialize_into", names[4 + 23]);
+}
+
+test "serialize/deserialize wrappers set error codes on failure" {
+    var sample = Sample{ .id = 1, .value = 1.0, .name = [_]u8{0} ** 8 };
+    const cpu: c_int = @intCast(@intFromEnum(Target.cpu));
+
+    // produce a valid wire, then corrupt the payload
+    var out_len: usize = 0;
+    const wire = c_api.serializeForType(Sample, &sample, cpu, &out_len);
+    try testing.expect(wire != null);
+    defer c_api.freeAlloc(@ptrCast(wire.?));
+
+    // flip a payload byte (the alignment tail is not CRC-covered, so the
+    // corruption must land inside [HEADER_SIZE, HEADER_SIZE + sizeOf))
+    wire.?[format.HEADER_SIZE] ^= 0xFF;
+    try testing.expect(c_api.deserializeForType(Sample, wire, out_len) == null);
+    try testing.expectEqual(c_error.Error.checksum_mismatch, c_error.getError());
+
+    var garbage = [_]u8{0xAB} ** 32; // bad magic -> corrupt
+    try testing.expect(c_api.deserializeForType(Sample, &garbage, garbage.len) == null);
+    try testing.expectEqual(c_error.Error.buffer_corrupt, c_error.getError());
+
+    try testing.expect(c_api.deserializeForType(Sample, null, 0) == null);
+    try testing.expectEqual(c_error.Error.null_param, c_error.getError());
+
+    try testing.expect(c_api.serializeForType(Sample, &sample, 99, &out_len) == null);
+    try testing.expectEqual(c_error.Error.unsupported_type, c_error.getError());
+
+    try testing.expectEqual(@as(u64, 0), c_api.arrayCountFromBytes(&garbage, garbage.len));
+    try testing.expectEqual(c_error.Error.buffer_corrupt, c_error.getError());
+
+    // success path clears prior error state
+    const ok_wire = c_api.serializeForType(Sample, &sample, cpu, &out_len);
+    try testing.expect(ok_wire != null);
+    try testing.expectEqual(c_error.Error.ok, c_error.getError());
+    c_api.freeAlloc(@ptrCast(ok_wire.?));
 }
