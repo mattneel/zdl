@@ -75,7 +75,8 @@
   - Query class with fluent API
   - Type hints for IDE support
   - `zig build gen-python`
-- [ ] TypeScript bindings (Bun FFI)
+- [x] TypeScript bindings — delivered in v0.3.0 via wasm64 + generated
+      `zdl.d.mts` (WASM superseded the Bun FFI approach)
   - Memory ownership documented
   - Error handling examples
   - Zero unsafe casts
@@ -92,7 +93,33 @@
 
 ---
 
-## Phase 3: Validation (v0.3.0)
+## Phase 2.5: Mutation, Performance & WebAssembly (v0.3.0) ✅
+**Goal:** CRUD over containers, honest benchmarks, run everywhere
+
+(Unplanned phase — emerged from the 1M-CRUD-ops/sec gauntlet. The
+originally planned v0.3.0 scope, Validation, moves to v0.4.0.)
+
+### Shipped
+- [x] Zero-allocation serialization (`serializeInto`, `serializedSize`)
+  - Bulk-copy fast path for padding-free types
+  - Wire format byte-identical (84,000-case differential fuzz)
+- [x] `MutableContainer(T)` — in-memory CRUD over v1 containers
+  - Per-record CRC sidecar: O(record) updates and verified point reads
+  - Tombstone deletes; relocation only at compact/reserve fences
+  - Generation-checked views (`error.StaleView`); lifetime oracle with
+    a mutation test of the oracle itself
+- [x] C FFI expansion: 42 functions per schema, error codes 11-18,
+      `zdl_alloc`/`zdl_free`
+- [x] Python `{Type}Mutable` bindings
+- [x] wasm64-freestanding target (`zig build wasm`, ~22 KB) with a
+      header-prefixed portable allocator (no libc)
+- [x] JavaScript ES module + TypeScript declarations (`zig build gen-js`)
+- [x] Honest benchmark suite + CRUD benchmark over real operations
+- [x] All four CRUD letters >4M ops/sec single-threaded (gate was 1M)
+
+---
+
+## Phase 3: Validation (v0.4.0)
 **Goal:** Bulletproof input validation
 
 ### Must Have
@@ -122,7 +149,7 @@
 
 ---
 
-## Phase 4: Query Engine Optimization (v0.4.0)
+## Phase 4: Query Engine Optimization (v0.5.0)
 **Goal:** Fast, safe data access
 
 ### Must Have
@@ -155,7 +182,7 @@
 
 ---
 
-## Phase 5: Distributed (v0.5.0)
+## Phase 5: Distributed (v0.6.0)
 **Goal:** Safe concurrent data
 
 ### Must Have
@@ -187,7 +214,7 @@
 
 ---
 
-## Phase 6: GPU Support (v0.6.0)
+## Phase 6: GPU Support (v0.7.0)
 **Goal:** Heterogeneous compute
 
 ### Must Have
@@ -215,7 +242,7 @@
 
 ---
 
-## Phase 7: Additional Language Bindings (v0.7.0)
+## Phase 7: Additional Language Bindings (v0.8.0)
 **Goal:** Universal accessibility
 
 ### Must Have
@@ -227,10 +254,10 @@
   - Idiomatic API
   - Error handling
   - CGo optimized
-- [ ] TypeScript bindings
-  - Bun FFI or WASM
-  - Type-safe wrappers
-  - Async support
+- [x] TypeScript bindings — shipped in v0.3.0
+  - WASM (wasm64-freestanding) with generated `zdl.d.mts`
+  - Type-safe wrappers (schema-derived literal unions)
+  - Async load (`loadZdl`)
 
 ### Success Criteria
 - Feels native in each language

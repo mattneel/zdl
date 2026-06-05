@@ -661,6 +661,6 @@ which bump the container generation; any older view traps with
 
 ---
 
-**Version:** 0.2.0
+**Version:** 0.3.0
 **Zig:** 0.15.1+
 **Philosophy:** TigerStyle – Safety, Performance, Developer Experience

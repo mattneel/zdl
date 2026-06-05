@@ -1,5 +1,116 @@
 # Changelog
 
+## [0.3.0] - Mutable Containers, Performance & WebAssembly
+
+### Added
+
+**Zero-Allocation Serialization**
+- `serializeInto(dest, value, target)` writes into a caller buffer, returns
+  the written sub-slice (`error.BufferTooSmall` on undersized dest)
+- `serializedSize(T, target)` for comptime buffer sizing
+- Comptime bulk-copy fast path: padding-free types marshal as a single
+  `@memcpy`; padded structs, bools, and odd-width ints keep the
+  deterministic per-field path with zeroed padding
+
+**Mutable Containers**
+- `zdl.mutable.MutableContainer(T)` — in-memory CRUD over the v1 array
+  container format (wire format unchanged: `load` ingests `serializeArray`
+  output, `flush` emits it)
+- Per-record CRC32 sidecar (runtime state): updates re-CRC one record
+  instead of the whole container; `getVerified` gives integrity-checked
+  random access in O(record)
+- Tombstone deletes: no bytes move, existing zero-copy views keep reading
+  stable bytes, traversals skip the record
+- Relocation only at named fences (`compact`, `reserve`): the container
+  generation bumps and stale views trap with `error.StaleView`; compaction
+  poisons freed slots (0xAA) in safety-checked builds and moves sidecar
+  CRCs without recomputing; `reserve` is failure-atomic
+- `append` never relocates: `error.CapacityFull` instead of realloc under
+  live views
+- Lifetime oracle test suite: randomized mutation/view schedules checked
+  against a shadow model, plus a mutation test of the oracle itself
+
+**C FFI (42 functions per schema, up from 25)**
+- `{prefix}_serialize_into`, `{prefix}_serialized_size`
+- `{prefix}_mut_*` (17 functions): new/load/free/append/get/get_verified/
+  update/delete/compact/reserve/len/live/generation/flush/iter_start/
+  iter_next/iter_reset
+- Error codes 11-18: capacity_full, stale_view, slot_out_of_range,
+  slot_deleted, checksum_mismatch, version_mismatch, buffer_too_small,
+  data_too_large
+- Global `zdl_alloc`/`zdl_free` for host-side buffer placement
+- Pointer-lifetime protocol: fences invalidate `mut_get`/`mut_iter_next`
+  pointers; after a fence `mut_iter_next` returns NULL with
+  `ZDL_ERR_STALE_VIEW`; `mut_generation` exposes the fence counter
+
+**Python Bindings**
+- `{Type}Mutable` class with the full CRUD lifecycle; all reads return
+  copies so pointer lifetimes never leak into Python
+
+**WebAssembly**
+- `zig build wasm` — wasm64-freestanding module (~22 KB ReleaseSmall)
+  exposing the full C API surface; requires Memory64 (Node >= 24, V8 13+)
+- Portable allocation layer: freestanding allocations carry a 16-byte
+  header (length + canary) over `std.heap.wasm_allocator`, preserving the
+  free-by-bare-pointer contract without libc
+- `zig build gen-js` — `zdl.mjs` ES module (BigInt at the wasm64 boundary,
+  views never cached across calls) plus `zdl.d.mts` TypeScript
+  declarations derived from the schema at comptime (u64 -> bigint,
+  schema-derived `filter()` field-name literal unions)
+
+**Benchmarks**
+- `zig build benchmark-crud` — all four CRUD letters as real library
+  operations across the immutable wire path and MutableContainer
+
+### Changed
+
+- Benchmarks measure honestly: `smp_allocator` instead of the
+  GeneralPurposeAllocator/DebugAllocator, per-iteration input variation and
+  `doNotOptimizeAway` sinks, reported bytes match actual wire length, and
+  the query benchmark separates one-time container CRC validation from pure
+  scan throughput
+- `format.canonicalize` and `format.schemaVersion` are now public
+- `MutableContainer.load` rejects schema version drift
+  (`error.VersionMismatch`)
+- Shared library now carries a semantic version (soname)
+
+### Fixed
+
+- Serialization was ~90x slower than deserialization: per-element array
+  marshaling (one 1-byte copy per element) replaced by bulk copies; the
+  serialize benchmark also measured the debug allocator's page churn
+  rather than the library
+- Latent buffer overrun serializing ints whose ABI size exceeds their wire
+  size (e.g. u24)
+- C wrappers (`serialize`, `deserialize`, `serialize_array`, `array_count`)
+  returned null on failure without setting the thread-local error code;
+  callers checking `zdl_last_error()` saw stale state
+
+### Performance
+
+| Operation | Throughput |
+|-----------|------------|
+| serializeInto (zero-alloc, 112 B record) | ~6.4M ops/sec, ~900 MB/sec |
+| deserialize + CRC verify | ~6.3M ops/sec, ~900 MB/sec |
+| Query scan (warm) | >800M rows/sec |
+| MutableContainer append / update / getVerified | ~5-6M ops/sec |
+| Tombstone delete (incl. compaction share) | ~80M ops/sec |
+
+Both serialize paths are now CRC-bound; the single-table CRC32
+(~600-900 MB/sec) is the next ceiling.
+
+### Tests
+
+- 111 tests (up from 83), including the lifetime oracle, mutable container
+  API and wire round-trips, FFI error codes, and export-name coverage
+- Wire-format compatibility verified by differential fuzzing against the
+  previous serializer (84,000 cases) and load->mutate->flush shadow-model
+  fuzzing (1,600 schedules)
+- Run `zig build test -Doptimize=ReleaseFast` as well as Debug: optimizer
+  behavior (RVO) is semantically relevant to padding determinism
+
+---
+
 ## [0.2.0] - C API Layer for FFI Wrapper Generation
 
 ### Added

@@ -213,6 +213,7 @@ pub fn build(b: *std.Build) void {
         .name = "zdl",
         .linkage = .dynamic,
         .root_module = zdl_lib_module,
+        .version = .{ .major = 0, .minor = 3, .patch = 0 },
     });
     b.installArtifact(zdl_shared_lib);
 
