@@ -188,7 +188,7 @@ pub fn build(b: *std.Build) void {
         run_step_example.dependOn(&run_example.step);
     }
 
-    const benchmark_names = [_][]const u8{ "serialize", "deserialize", "query" };
+    const benchmark_names = [_][]const u8{ "serialize", "deserialize", "query", "crud" };
     for (benchmark_names) |bench_name| {
         const bench_module = b.createModule(.{
             .root_source_file = b.path(b.fmt("benchmarks/{s}.zig", .{bench_name})),
