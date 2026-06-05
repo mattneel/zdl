@@ -15,7 +15,7 @@ Fast, type-safe data serialization for Zig with schema evolution, C FFI, and Pyt
 - **Target-specific layouts** (CPU, disk, network)
 - **Full C FFI** with query, mutable container, iterator, and introspection APIs
 - **Python bindings** with ctypes and dataclass support
-- **WebAssembly** — freestanding wasm64 module with generated JS (ES module) bindings and TypeScript declarations
+- **WebAssembly** — freestanding wasm64 + wasm32 modules with feature-detecting JS (ES module) bindings and TypeScript declarations
 
 ## Installation
 
@@ -382,15 +382,32 @@ for record in mc2:
 
 ## WebAssembly
 
-zdl compiles to a freestanding wasm64 module exposing the full C API
-surface — no WASI, no libc, no JS runtime dependencies beyond Memory64
-(Node ≥ 24, V8 13+, recent Chrome/Firefox). Allocations that cross the
-boundary carry a hidden size header so the `{prefix}_free(ptr)` contract
-works without malloc.
+zdl compiles to freestanding wasm modules exposing the full C API surface —
+no WASI, no libc. Allocations that cross the boundary carry a hidden size
+header so the `{prefix}_free(ptr)` contract works without malloc.
+
+Two ABIs are built, because Memory64 is a capability/adoption trade:
+
+| Module | Memory model | Runs on |
+|--------|--------------|---------|
+| `zdl64.wasm` | Memory64 (>4 GB datasets) | Node ≥ 24, V8 13+, recent Chrome/Firefox |
+| `zdl32.wasm` | 32-bit (≤4 GB) | Everything above **plus** Safari, older Node, edge/CDN runtimes |
 
 ```sh
-zig build wasm -Doptimize=ReleaseSmall   # zig-out/wasm/zdl.wasm (~22 KB)
+zig build wasm -Doptimize=ReleaseSmall   # zig-out/wasm/zdl{64,32}.wasm (~20 KB each)
 zig build gen-js                         # zig-out/js/zdl.mjs + zdl.d.mts
+```
+
+The generated bindings detect the ABI at load time; `loadZdlAuto` picks the
+right module per runtime and fetches only that one:
+
+```js
+import { loadZdlAuto } from "./zdl.mjs";
+
+const zdl = await loadZdlAuto({
+  wasm64: () => fetch("zdl64.wasm"), // used where Memory64 exists
+  wasm32: () => fetch("zdl32.wasm"), // fallback everywhere else
+});
 ```
 
 ### JavaScript Usage
@@ -398,7 +415,7 @@ zig build gen-js                         # zig-out/js/zdl.mjs + zdl.d.mts
 ```js
 import { loadZdl, ZdlError } from "./zdl.mjs";
 
-const zdl = await loadZdl(wasmBytes); // bytes, Module, or fetch() Response
+const zdl = await loadZdl(wasmBytes); // either ABI: bytes, Module, or fetch() Response
 const { FfiUser, FfiUserQuery, FfiUserMutable } = zdl;
 
 // Serialize / deserialize (u64 fields are BigInt)
@@ -422,9 +439,10 @@ const wire = mc.flush();             // standard array container bytes
 const mc2 = FfiUserMutable.load(wire);
 ```
 
-Pointers and sizes cross the wasm64 boundary as BigInt; the generated
-bindings handle the conversions and never cache views across calls
-(memory growth detaches ArrayBuffers).
+Pointers and sizes cross the boundary as BigInt on wasm64 and Number on
+wasm32; the generated bindings handle the conversions and never cache views
+across calls (memory growth detaches ArrayBuffers). The data model is
+identical on both ABIs — `u64` fields are always BigInt.
 
 ### TypeScript
 

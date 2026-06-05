@@ -1,5 +1,19 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Dual-target WebAssembly: `zig build wasm` now also produces `zdl32.wasm`
+  alongside `zdl64.wasm`. Memory64 buys >4 GB datasets but draws an
+  adoption boundary at recent runtimes (Node >= 24, V8 13+); the 32-bit
+  module covers Safari, older Node, and edge runtimes at a <=4 GB ceiling.
+- `supportsMemory64()` and `loadZdlAuto({ wasm64, wasm32 })` in the
+  generated JS bindings: feature-detect at load time and fetch only the
+  module the runtime can run. The bindings adapt to either ABI
+  (pointers/sizes are BigInt on wasm64, Number on wasm32); the data model
+  is identical on both — u64 fields are always BigInt.
+
 ## [0.3.0] - Mutable Containers, Performance & WebAssembly
 
 ### Added

@@ -217,25 +217,38 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(zdl_shared_lib);
 
-    // Freestanding WebAssembly module exposing the same C API surface.
-    const wasm_target = b.resolveTargetQuery(.{
-        .cpu_arch = .wasm64,
-        .os_tag = .freestanding,
-    });
-    const wasm_module = b.createModule(.{
-        .root_source_file = b.path("src/lib_root.zig"),
-        .target = wasm_target,
-        .optimize = optimize,
-    });
-    wasm_module.export_symbol_names = generateExportNames();
-    const wasm_exe = b.addExecutable(.{
-        .name = "zdl",
-        .root_module = wasm_module,
-    });
-    wasm_exe.entry = .disabled;
-    const wasm_install = b.addInstallFile(wasm_exe.getEmittedBin(), "wasm/zdl.wasm");
-    const wasm_step = b.step("wasm", "Build freestanding WebAssembly module (zig-out/wasm/zdl.wasm)");
-    wasm_step.dependOn(&wasm_install.step);
+    // Freestanding WebAssembly modules exposing the same C API surface.
+    // Dual-target: wasm64 (Memory64) holds >4 GB datasets on current engines
+    // (Node >= 24, V8 13+); wasm32 covers the wider adoption matrix (Safari,
+    // older Node, edge runtimes). The generated JS bindings feature-detect
+    // Memory64 and adapt to either ABI at load time.
+    const wasm_step = b.step("wasm", "Build freestanding WebAssembly modules (zig-out/wasm/zdl{64,32}.wasm)");
+    const wasm_variants = [_]struct { arch: std.Target.Cpu.Arch, name: []const u8 }{
+        .{ .arch = .wasm64, .name = "zdl64" },
+        .{ .arch = .wasm32, .name = "zdl32" },
+    };
+    for (wasm_variants) |variant| {
+        const wasm_target = b.resolveTargetQuery(.{
+            .cpu_arch = variant.arch,
+            .os_tag = .freestanding,
+        });
+        const wasm_module = b.createModule(.{
+            .root_source_file = b.path("src/lib_root.zig"),
+            .target = wasm_target,
+            .optimize = optimize,
+        });
+        wasm_module.export_symbol_names = generateExportNames();
+        const wasm_exe = b.addExecutable(.{
+            .name = variant.name,
+            .root_module = wasm_module,
+        });
+        wasm_exe.entry = .disabled;
+        const wasm_install = b.addInstallFile(
+            wasm_exe.getEmittedBin(),
+            b.fmt("wasm/{s}.wasm", .{variant.name}),
+        );
+        wasm_step.dependOn(&wasm_install.step);
+    }
 
     const gen_headers_module = b.createModule(.{
         .root_source_file = b.path("tools/generate_headers.zig"),
