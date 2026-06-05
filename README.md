@@ -6,11 +6,14 @@ Fast, type-safe data serialization for Zig with schema evolution, C FFI, and Pyt
 
 - **Comptime schema validation** with explicit TigerStyle bounds
 - **CPU-target serialization** with CRC32 protection
+- **Zero-allocation hot path** (`serializeInto` writes into caller buffers)
+- **Mutable containers** — in-memory CRUD over serialized containers with
+  per-record CRC integrity, tombstone deletes, and generation-fenced views
 - **Type-safe migrations** (v1 ↔ v2 ↔ v3)
 - **Changeset validation** (Ecto-style) with bounded errors
 - **Zero-copy querying** over serialized payloads
 - **Target-specific layouts** (CPU, disk, network)
-- **Full C FFI** with query, iterator, and introspection APIs
+- **Full C FFI** with query, mutable container, iterator, and introspection APIs
 - **Python bindings** with ctypes and dataclass support
 
 ## Installation
@@ -48,6 +51,10 @@ const User = struct {
 // Serialize
 const bytes = try zdl.serialize.serialize(user, .cpu, allocator);
 defer allocator.free(@constCast(bytes));
+
+// Zero-allocation hot path: serialize into a caller buffer
+var buf: [zdl.serialize.serializedSize(User, .cpu)]u8 = undefined;
+const wire = try zdl.serialize.serializeInto(&buf, user, .cpu);
 
 // Deserialize
 const loaded = try zdl.deserialize.deserialize(User, bytes, allocator);
@@ -134,7 +141,15 @@ typedef enum {
     ZDL_ERR_LIMIT_REQUIRED = 7,
     ZDL_ERR_TOO_MANY_FILTERS = 8,
     ZDL_ERR_ITER_NOT_STARTED = 9,
-    ZDL_ERR_UNSUPPORTED_TYPE = 10
+    ZDL_ERR_UNSUPPORTED_TYPE = 10,
+    ZDL_ERR_CAPACITY_FULL = 11,
+    ZDL_ERR_STALE_VIEW = 12,
+    ZDL_ERR_SLOT_OUT_OF_RANGE = 13,
+    ZDL_ERR_SLOT_DELETED = 14,
+    ZDL_ERR_CHECKSUM = 15,
+    ZDL_ERR_VERSION = 16,
+    ZDL_ERR_BUFFER_TOO_SMALL = 17,
+    ZDL_ERR_DATA_TOO_LARGE = 18
 } zdl_error_t;
 
 // Comparison operators
@@ -164,7 +179,7 @@ typedef struct {
 } zdl_field_info_t;
 ```
 
-#### Per-Schema Functions (25 per schema)
+#### Per-Schema Functions (42 per schema)
 
 | Category | Function | Signature |
 |----------|----------|-----------|
@@ -191,6 +206,31 @@ typedef struct {
 | | `{prefix}_field_info` | `const zdl_field_info_t* (size_t index)` |
 | | `{prefix}_field_by_name` | `const zdl_field_info_t* (const char* name)` |
 | | `{prefix}_struct_size` | `size_t (void)` |
+| **Zero-alloc** | `{prefix}_serialize_into` | `zdl_error_t (const T* value, uint8_t* dest, size_t dest_len, zdl_target_t target, size_t* out_len)` |
+| | `{prefix}_serialized_size` | `size_t (zdl_target_t target)` |
+| **Mutable** | `{prefix}_mut_new` | `struct {prefix}_mut* (size_t capacity)` |
+| | `{prefix}_mut_load` | `struct {prefix}_mut* (const uint8_t* bytes, size_t len, size_t extra_capacity)` |
+| | `{prefix}_mut_free` | `void (struct {prefix}_mut* m)` |
+| | `{prefix}_mut_append` | `zdl_error_t (struct {prefix}_mut* m, const T* value, size_t* out_slot)` |
+| | `{prefix}_mut_get` | `const T* (struct {prefix}_mut* m, size_t slot)` |
+| | `{prefix}_mut_get_verified` | `zdl_error_t (struct {prefix}_mut* m, size_t slot, T* out)` |
+| | `{prefix}_mut_update` | `zdl_error_t (struct {prefix}_mut* m, size_t slot, const T* value)` |
+| | `{prefix}_mut_delete` | `zdl_error_t (struct {prefix}_mut* m, size_t slot)` |
+| | `{prefix}_mut_compact` | `void (struct {prefix}_mut* m)` |
+| | `{prefix}_mut_reserve` | `zdl_error_t (struct {prefix}_mut* m, size_t additional)` |
+| | `{prefix}_mut_len` | `size_t (const struct {prefix}_mut* m)` |
+| | `{prefix}_mut_live` | `size_t (const struct {prefix}_mut* m)` |
+| | `{prefix}_mut_generation` | `uint64_t (const struct {prefix}_mut* m)` |
+| | `{prefix}_mut_flush` | `uint8_t* (struct {prefix}_mut* m, size_t* out_len)` |
+| | `{prefix}_mut_iter_start` | `zdl_error_t (struct {prefix}_mut* m)` |
+| | `{prefix}_mut_iter_next` | `const T* (struct {prefix}_mut* m)` |
+| | `{prefix}_mut_iter_reset` | `void (struct {prefix}_mut* m)` |
+
+Pointers returned by `mut_get`/`mut_iter_next` point into container storage
+and are invalidated by the relocation fences (`mut_compact`, `mut_reserve`).
+After a fence, `mut_iter_next` returns NULL with
+`zdl_last_error() == ZDL_ERR_STALE_VIEW`; plain end-of-iteration leaves the
+error at `ZDL_OK`. Watch `mut_generation` to detect fences.
 
 ### C Query Example
 
@@ -224,6 +264,35 @@ int main(void) {
     ffi_user_free(results);
     ffi_user_query_free(q);
     ffi_user_free(bytes);
+}
+```
+
+### C Mutable Container Example
+
+```c
+#include "ffi_user.h"
+
+int main(void) {
+    struct ffi_user_mut *m = ffi_user_mut_new(1024);
+
+    FfiUser u = { .id = 1, .score = 9.5f };
+    size_t slot;
+    ffi_user_mut_append(m, &u, &slot);
+
+    u.score = 10.0f;
+    ffi_user_mut_update(m, slot, &u);          // re-CRCs one record
+
+    FfiUser out;
+    ffi_user_mut_get_verified(m, slot, &out);  // integrity-checked point read
+
+    ffi_user_mut_delete(m, slot);              // tombstone: no bytes move
+    ffi_user_mut_compact(m);                   // fence: reclaims, bumps generation
+
+    size_t len;
+    uint8_t *wire = ffi_user_mut_flush(m, &len); // standard array container
+
+    ffi_user_free(wire);
+    ffi_user_mut_free(m);
 }
 ```
 
@@ -277,6 +346,19 @@ count = FfiUserQuery(array_data).filter("score", ">=", 50).count()
 # Introspection
 print(f"Fields: {FfiUser.field_count()}")
 print(f"Struct size: {FfiUser.struct_size()} bytes")
+
+# Mutable container (in-memory CRUD; all reads return copies)
+mc = FfiUserMutable(capacity=1024)
+slot = mc.append(FfiUser(id=1, score=9.5))
+mc.update(slot, FfiUser(id=1, score=10.0))   # re-CRCs one record
+user = mc.get_verified(slot)                 # integrity-checked point read
+mc.delete(slot)                              # tombstone: no bytes move
+mc.compact()                                 # fence: reclaims tombstones
+
+wire = mc.flush()                            # standard array container bytes
+mc2 = FfiUserMutable.load(wire)              # validates container CRC
+for record in mc2:
+    print(record)
 ```
 
 ### Python Query Operators
@@ -309,11 +391,24 @@ Run with `zig build example-basic_usage` (etc).
 
 | Operation | Throughput |
 |-----------|------------|
-| Serialization | >100 MB/sec |
-| Deserialization | >100 MB/sec |
-| Query iteration | >100 MB/sec |
+| Serialization (zero-alloc) | >6M ops/sec, >700 MB/sec |
+| Deserialization + CRC verify | >6M ops/sec, >700 MB/sec |
+| Query scan (warm) | >500M rows/sec |
+| Mutable append / update / verified read | >4M ops/sec |
+| Mutable tombstone delete (incl. compaction share) | >50M ops/sec |
 
-Run benchmarks: `zig build benchmark-serialize`, `zig build benchmark-query`
+Run benchmarks with `-Doptimize=ReleaseFast` (without it they measure Debug builds):
+
+```sh
+zig build benchmark-serialize -Doptimize=ReleaseFast
+zig build benchmark-deserialize -Doptimize=ReleaseFast
+zig build benchmark-query -Doptimize=ReleaseFast
+zig build benchmark-crud -Doptimize=ReleaseFast
+```
+
+`benchmark-crud` measures all four CRUD letters as real library operations:
+the immutable wire path (`wire`) and `zdl.mutable.MutableContainer`
+(`mutable` — per-record CRC sidecar, tombstone deletes, compaction fences).
 
 ---
 
@@ -449,6 +544,39 @@ while (it.next()) |record| {
     // Zero-copy pointer into serialized buffer
 }
 ```
+
+## Mutable Containers (Zig)
+
+`zdl.mutable.MutableContainer(T)` provides in-memory CRUD over the standard
+array container format. The wire format is unchanged — `load` ingests
+containers produced by `serializeArray` (validating the container CRC once)
+and `flush` emits one. Between those boundaries integrity moves to a
+per-record CRC sidecar, which is what makes mutation affordable: an update
+re-CRCs one record instead of the whole container, and `getVerified` gives
+integrity-checked random access in O(record).
+
+```zig
+var mc = try zdl.mutable.MutableContainer(Event).load(allocator, bytes, 64);
+defer mc.deinit();
+
+const slot = try mc.append(.{ .id = 1, .status = 2, .duration_ms = 5 });
+try mc.update(slot, .{ .id = 1, .status = 3, .duration_ms = 7 });
+const event = try mc.getVerified(slot); // per-record CRC check, returns copy
+try mc.delete(slot);                    // tombstone: no bytes move
+mc.compact();                           // fence: reclaims, preserves order
+
+const wire = try mc.flush(allocator);   // standard array container
+defer allocator.free(wire);
+```
+
+**Lifetime contract** (pinned by `tests/core/lifetime_oracle_test.zig`):
+zero-copy views (`get`, `view`, `iter`) point into container storage. A
+tombstone delete never moves bytes, so existing views keep reading stable
+bytes; in-place updates are visible through views without invalidating them.
+Records relocate **only** at the named fences — `compact()` and `reserve()` —
+which bump the container generation; any older view traps with
+`error.StaleView` on its next access. `append` never relocates: it returns
+`error.CapacityFull` instead of reallocating under live views.
 
 ## Core Principles
 
