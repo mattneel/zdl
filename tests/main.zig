@@ -11,6 +11,8 @@ test {
     _ = @import("core/target_test.zig");
     _ = @import("core/layout_test.zig");
     _ = @import("core/query_test.zig");
+    _ = @import("core/lifetime_oracle_test.zig");
+    _ = @import("core/mutable_test.zig");
     _ = @import("codegen/c_header_test.zig");
     _ = @import("export/c_api_test.zig");
 }

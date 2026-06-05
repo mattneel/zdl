@@ -166,7 +166,7 @@ pub fn arrayCount(bytes: []const u8) FormatError!u64 {
     return readIntLittle(u64, bytes, header_len);
 }
 
-fn schemaVersion(comptime T: type) u32 {
+pub fn schemaVersion(comptime T: type) u32 {
     if (@hasDecl(T, "zdl_config")) {
         const cfg = @field(T, "zdl_config");
         if (@hasField(@TypeOf(cfg), "version")) {
@@ -176,7 +176,7 @@ fn schemaVersion(comptime T: type) u32 {
     return 0;
 }
 
-fn canonicalize(comptime T: type, value: T) T {
+pub fn canonicalize(comptime T: type, value: T) T {
     return switch (@typeInfo(T)) {
         .bool, .int, .float => value,
         .array => |info| blk: {

@@ -10,6 +10,7 @@ pub const migrate = @import("core/migrate.zig");
 pub const changeset = @import("core/changeset.zig");
 pub const validators = @import("core/validators.zig");
 pub const query = @import("core/query.zig");
+pub const mutable = @import("core/mutable.zig");
 pub const layout = @import("core/layout.zig");
 const c_header_mod = @import("codegen/c_header.zig");
 const c_common_mod = @import("codegen/c_common.zig");
