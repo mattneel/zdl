@@ -15,6 +15,7 @@ Fast, type-safe data serialization for Zig with schema evolution, C FFI, and Pyt
 - **Target-specific layouts** (CPU, disk, network)
 - **Full C FFI** with query, mutable container, iterator, and introspection APIs
 - **Python bindings** with ctypes and dataclass support
+- **WebAssembly** — freestanding wasm64 module with generated JS (ES module) bindings and TypeScript declarations
 
 ## Installation
 
@@ -371,6 +372,72 @@ for record in mc2:
 | Less/Equal | `"<="`, `"le"` |
 | Greater Than | `">"`, `"gt"` |
 | Greater/Equal | `">="`, `"ge"` |
+
+---
+
+## WebAssembly
+
+zdl compiles to a freestanding wasm64 module exposing the full C API
+surface — no WASI, no libc, no JS runtime dependencies beyond Memory64
+(Node ≥ 24, V8 13+, recent Chrome/Firefox). Allocations that cross the
+boundary carry a hidden size header so the `{prefix}_free(ptr)` contract
+works without malloc.
+
+```sh
+zig build wasm -Doptimize=ReleaseSmall   # zig-out/wasm/zdl.wasm (~22 KB)
+zig build gen-js                         # zig-out/js/zdl.mjs + zdl.d.mts
+```
+
+### JavaScript Usage
+
+```js
+import { loadZdl, ZdlError } from "./zdl.mjs";
+
+const zdl = await loadZdl(wasmBytes); // bytes, Module, or fetch() Response
+const { FfiUser, FfiUserQuery, FfiUserMutable } = zdl;
+
+// Serialize / deserialize (u64 fields are BigInt)
+const data = FfiUser.serialize({ id: 42n, score: 3.14, name: "alice" });
+const user = FfiUser.deserialize(data);
+
+// Query
+const arr = FfiUser.serializeArray(users);
+const hits = new FfiUserQuery(arr)
+  .filter("score", ">=", 50.0)
+  .limit(20)
+  .collect();
+
+// Mutable container (all reads return copies)
+const mc = new FfiUserMutable(1024);
+const slot = mc.append({ id: 1n, score: 9.5, name: "a" });
+mc.update(slot, { id: 1n, score: 10.0, name: "a" });
+mc.delete(slot);
+mc.compact();
+const wire = mc.flush();             // standard array container bytes
+const mc2 = FfiUserMutable.load(wire);
+```
+
+Pointers and sizes cross the wasm64 boundary as BigInt; the generated
+bindings handle the conversions and never cache views across calls
+(memory growth detaches ArrayBuffers).
+
+### TypeScript
+
+`gen-js` also emits `zdl.d.mts` — full TypeScript declarations derived
+from the schema at comptime. TypeScript consumers get them automatically
+when importing `./zdl.mjs`; no toolchain changes for JS consumers. The
+types encode what the schema knows: `u64` fields decode as `bigint` (and
+accept `bigint | number` on input), `[N]u8` decodes as `Uint8Array` (and
+accepts `string | Uint8Array` on input), and `Query.filter()` field names
+are a literal union of the schema's numeric fields — typos are compile
+errors:
+
+```ts
+const zdl: ZdlApi = await loadZdl(wasmBytes);
+const u: FfiUser = zdl.FfiUser.deserialize(data);
+const id: bigint = u.id;                       // u64 -> bigint
+new zdl.FfiUserQuery(arr).filter("score", ">=", 50.0); // "scrose" would not compile
+```
 
 ---
 
